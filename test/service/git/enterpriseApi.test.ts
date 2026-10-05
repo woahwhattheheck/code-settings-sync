@@ -10,11 +10,17 @@ import {
   createPrivateRepository,
   EnterpriseApiSettings,
   EnterpriseResponse,
+  EnterpriseSettingsTarget,
   EnterpriseTransport,
-  listOwnedRepositories
+  getSettingsFile,
+  listOwnedRepositories,
+  putSettingsFile
 } from "../../../src/service/git/enterpriseApi";
 
 const TOKEN = "local-enterprise-token";
+const SHA_A = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+const SHA_B = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+const FILE_TEXT = '{"version":1,"label":"caf\u00e9"}\n';
 
 describe("enterprise repository API", () => {
   const directory = fs.mkdtempSync(
@@ -593,6 +599,912 @@ describe("enterprise repository API", () => {
         await server.close();
       }
     });
+
+    it("puts and gets settings-sync.json on GitHub Enterprise", async () => {
+      const content = '{"uploaded":true}\n';
+      let reads = 0;
+      const server = await listen(certificate, hit => {
+        expect(hit.authorization).to.equal("token " + TOKEN);
+        expect(hit.privateToken).to.equal("");
+        expect(hit.url.indexOf(TOKEN)).to.equal(-1);
+        if (
+          hit.method === "GET" &&
+          hit.url.indexOf("/contents/settings-sync.json") !== -1
+        ) {
+          reads++;
+          const text = reads === 1 ? "old\n" : content;
+          const sha = reads === 1 ? SHA_A : SHA_B;
+          expect(hit.url).to.equal(
+            "/api/v3/repos/me/settings/contents/settings-sync.json?ref=office"
+          );
+          return json(200, githubFile(sha, text));
+        }
+        expect(hit.method).to.equal("PUT");
+        expect(hit.url).to.equal(
+          "/api/v3/repos/me/settings/contents/settings-sync.json"
+        );
+        const payload = JSON.parse(hit.body);
+        expect(payload.sha).to.equal(SHA_A);
+        expect(payload.branch).to.equal("office");
+        expect(payload.message).to.equal("Update settings-sync.json");
+        expect(
+          Buffer.from(payload.content, "base64").toString("utf8")
+        ).to.equal(content);
+        return json(200, {
+          content: {
+            name: "settings-sync.json",
+            path: "settings-sync.json",
+            sha: SHA_B
+          }
+        });
+      });
+      try {
+        const api = "https://127.0.0.1:" + String(server.port) + "/api/v3";
+        const written = await putSettingsFile(
+          settings("github", api, TOKEN),
+          fileTarget("me/settings", "office"),
+          content,
+          { ca: certificate.cert }
+        );
+        expect(written).to.deep.equal({
+          content,
+          branch: "office",
+          sha: SHA_B
+        });
+        const read = await getSettingsFile(
+          settings("github", api, TOKEN),
+          fileTarget("me/settings", "office"),
+          { ca: certificate.cert }
+        );
+        expect(read).to.deep.equal({
+          content,
+          branch: "office",
+          sha: SHA_B
+        });
+        expect(server.hits).to.have.length(3);
+      } finally {
+        await server.close();
+      }
+    });
+
+    it("creates a GitLab branch and writes settings-sync.json", async () => {
+      const content = '{"office":true}\n';
+      const server = await listen(certificate, hit => {
+        expect(hit.privateToken).to.equal(TOKEN);
+        expect(hit.authorization).to.equal("");
+        expect(hit.url.indexOf(TOKEN)).to.equal(-1);
+        if (
+          hit.method === "GET" &&
+          hit.url.indexOf("/repository/files/") !== -1
+        ) {
+          return json(404, { message: "404 File Not Found" });
+        }
+        if (
+          hit.method === "GET" &&
+          hit.url.indexOf("/repository/branches/") !== -1
+        ) {
+          expect(hit.url).to.equal(
+            "/gitlab/api/v4/projects/group%2Fsettings/repository/branches/office"
+          );
+          return json(404, { message: "404 Branch Not Found" });
+        }
+        if (hit.method === "GET") {
+          expect(hit.url).to.equal("/gitlab/api/v4/projects/group%2Fsettings");
+          return json(200, { default_branch: "main", visibility: "private" });
+        }
+        if (
+          hit.method === "POST" &&
+          hit.url.indexOf("/repository/branches") !== -1
+        ) {
+          expect(JSON.parse(hit.body)).to.deep.equal({
+            branch: "office",
+            ref: "main"
+          });
+          return json(201, { name: "office" });
+        }
+        expect(hit.method).to.equal("POST");
+        expect(hit.url).to.equal(
+          "/gitlab/api/v4/projects/group%2Fsettings/repository/files/settings-sync.json"
+        );
+        expect(JSON.parse(hit.body).content).to.equal(content);
+        return json(201, {
+          file_path: "settings-sync.json",
+          branch: "office"
+        });
+      });
+      try {
+        const api =
+          "https://127.0.0.1:" + String(server.port) + "/gitlab/api/v4";
+        const written = await putSettingsFile(
+          settings("gitlab", api, TOKEN),
+          fileTarget("group/settings", "office"),
+          content,
+          { ca: certificate.cert }
+        );
+        expect(written).to.deep.equal({
+          content,
+          branch: "office",
+          sha: null
+        });
+        expect(server.hits).to.have.length(5);
+      } finally {
+        await server.close();
+      }
+    });
+
+    it("does not follow a settings download redirect onto another port", async () => {
+      const attacker = await listen(certificate, () =>
+        json(200, { stolen: TOKEN })
+      );
+      const api = await listen(certificate, () => ({
+        status: 302,
+        headers: {
+          Location: "https://127.0.0.1:" + String(attacker.port) + "/steal"
+        },
+        body: JSON.stringify({ token: TOKEN })
+      }));
+      try {
+        await expectRejection(
+          getSettingsFile(
+            settings(
+              "github",
+              "https://127.0.0.1:" + String(api.port) + "/api/v3",
+              TOKEN
+            ),
+            fileTarget("me/settings", "office"),
+            { ca: certificate.cert }
+          ),
+          "The enterprise API redirected the request. Refusing to follow it with the token."
+        );
+        expect(api.hits).to.have.length(1);
+        expect(api.hits[0].authorization).to.equal("token " + TOKEN);
+        expect(attacker.hits).to.have.length(0);
+      } finally {
+        await api.close();
+        await attacker.close();
+      }
+    });
+
+    it("does not follow a settings upload redirect onto another port", async () => {
+      const attacker = await listen(certificate, () =>
+        json(200, { stolen: TOKEN })
+      );
+      const api = await listen(certificate, hit => {
+        if (hit.method === "GET") {
+          return json(200, gitlabFile("old\n", "office"));
+        }
+        return {
+          status: 307,
+          headers: {
+            Location: "https://127.0.0.1:" + String(attacker.port) + "/steal"
+          },
+          body: JSON.stringify({ token: TOKEN })
+        };
+      });
+      try {
+        await expectRejection(
+          putSettingsFile(
+            settings(
+              "gitlab",
+              "https://127.0.0.1:" + String(api.port) + "/api/v4",
+              TOKEN
+            ),
+            fileTarget("group/settings", "office"),
+            FILE_TEXT,
+            { ca: certificate.cert }
+          ),
+          "The enterprise API redirected the request. Refusing to follow it with the token."
+        );
+        expect(api.hits).to.have.length(2);
+        expect(api.hits[0].privateToken).to.equal(TOKEN);
+        expect(attacker.hits).to.have.length(0);
+      } finally {
+        await api.close();
+        await attacker.close();
+      }
+    });
+
+    it("does not send the token for a settings read with an untrusted certificate", async () => {
+      const server = await listen(certificate, () =>
+        json(200, githubFile(SHA_A, FILE_TEXT))
+      );
+      try {
+        const error = await rejectionOf(
+          getSettingsFile(
+            settings(
+              "github",
+              "https://127.0.0.1:" + String(server.port) + "/api/v3",
+              TOKEN
+            ),
+            fileTarget("me/settings", "office"),
+            { ca: otherCertificate.cert }
+          )
+        );
+        expect(error.message.indexOf(TOKEN)).to.equal(-1);
+        expect(server.hits).to.have.length(0);
+      } finally {
+        await server.close();
+      }
+    });
+  });
+
+  describe("reads and writes one settings file on the enterprise host", () => {
+    it("rejects unsafe repository and branch names before opening a request", async () => {
+      const calls: URL[] = [];
+      const transport: EnterpriseTransport = url => {
+        calls.push(url);
+        return Promise.reject(new Error("transport should not be called"));
+      };
+      const api = settings("github", "https://git.example/api/v3", TOKEN);
+      const cases: Array<{
+        repository: string;
+        branch: string;
+        message: string;
+      }> = [
+        {
+          repository: "../settings",
+          branch: "office",
+          message: "Enter a GitHub repository as owner/name."
+        },
+        {
+          repository: "me/settings/extra",
+          branch: "office",
+          message: "Enter a GitHub repository as owner/name."
+        },
+        {
+          repository: "me/settings",
+          branch: "../office",
+          message:
+            "Enter a branch name using letters, numbers, dots, underscores, hyphens, or slashes."
+        },
+        {
+          repository: "me/settings",
+          branch: "feature//office",
+          message:
+            "Enter a branch name using letters, numbers, dots, underscores, hyphens, or slashes."
+        },
+        {
+          repository: "me/" + TOKEN,
+          branch: "office",
+          message: "Refusing to send the token to an unsafe repository API URL."
+        }
+      ];
+      for (let index = 0; index < cases.length; index++) {
+        const item = cases[index];
+        await expectRejection(
+          getSettingsFile(api, fileTarget(item.repository, item.branch), {
+            transport
+          }),
+          item.message
+        );
+      }
+      await expectRejection(
+        getSettingsFile(
+          settings("gitlab", "https://gitlab.example/api/v4", TOKEN),
+          fileTarget("https://attacker.example/group/settings", "office"),
+          { transport }
+        ),
+        "Enter a GitLab project id or group/name."
+      );
+      await expectRejection(
+        getSettingsFile(
+          settings("gitlab", "https://gitlab.example/api/v4", TOKEN),
+          fileTarget("group/../settings", "office"),
+          { transport }
+        ),
+        "Enter a GitLab project id or group/name."
+      );
+      await expectRejection(
+        putSettingsFile(
+          settings("github", "http://git.example/api/v3", TOKEN),
+          fileTarget("me/settings", "office"),
+          FILE_TEXT,
+          { transport }
+        ),
+        "The enterprise API URL must be HTTPS without credentials, a query, or a fragment."
+      );
+      await expectRejection(
+        putSettingsFile(
+          api,
+          fileTarget("me/settings", "office"),
+          "x".repeat(512 * 1024 + 1),
+          {
+            transport
+          }
+        ),
+        "The settings file is too large."
+      );
+      expect(calls).to.have.length(0);
+    });
+
+    it("downloads settings-sync.json from GitHub without leaving the host", async () => {
+      const session = serve(() => ({
+        statusCode: 200,
+        body: {
+          type: "file",
+          name: "settings-sync.json",
+          path: "settings-sync.json",
+          encoding: "base64",
+          content: wrapBase64(FILE_TEXT),
+          sha: SHA_A,
+          download_url: "https://attacker.example/settings-sync.json",
+          html_url: "https://attacker.example/blob/office/settings-sync.json"
+        },
+        headers: {
+          link: '<https://attacker.example/next>; rel="next"'
+        }
+      }));
+      const file = await getSettingsFile(
+        settings("github", "https://git.example/api/v3", TOKEN),
+        fileTarget("me/settings", "office"),
+        { transport: session.transport }
+      );
+      expect(file).to.deep.equal({
+        content: FILE_TEXT,
+        branch: "office",
+        sha: SHA_A
+      });
+      expect(session.calls).to.have.length(1);
+      expect(session.calls[0].method).to.equal("GET");
+      expect(session.calls[0].href).to.equal(
+        "https://git.example/api/v3/repos/me/settings/contents/settings-sync.json?ref=office"
+      );
+      expect(session.calls[0].authorization).to.equal("token " + TOKEN);
+      expect(session.calls[0].privateToken).to.equal("");
+      expectHost(session.calls, "https://git.example/");
+    });
+
+    it("replaces an existing GitHub file using its blob sha", async () => {
+      const session = serve(call => {
+        if (call.method === "GET") {
+          return { statusCode: 200, body: githubFile(SHA_A, "old\n") };
+        }
+        expect(JSON.parse(call.body)).to.deep.equal({
+          message: "Update settings-sync.json",
+          content: Buffer.from(FILE_TEXT, "utf8").toString("base64"),
+          branch: "office",
+          sha: SHA_A
+        });
+        return {
+          statusCode: 200,
+          body: {
+            content: {
+              name: "settings-sync.json",
+              path: "settings-sync.json",
+              sha: SHA_B,
+              download_url: "https://attacker.example/file"
+            },
+            commit: {
+              sha: SHA_B,
+              html_url: "https://attacker.example/commit/" + SHA_B
+            }
+          }
+        };
+      });
+      const written = await putSettingsFile(
+        settings("github", "https://GitHub.Example/api/v3", TOKEN),
+        fileTarget("me/settings", "office"),
+        FILE_TEXT,
+        { transport: session.transport }
+      );
+      expect(written).to.deep.equal({
+        content: FILE_TEXT,
+        branch: "office",
+        sha: SHA_B
+      });
+      expect(
+        session.calls.map(
+          call => call.method + " " + new URL(call.href).pathname
+        )
+      ).to.deep.equal([
+        "GET /api/v3/repos/me/settings/contents/settings-sync.json",
+        "PUT /api/v3/repos/me/settings/contents/settings-sync.json"
+      ]);
+      expect(new URL(session.calls[0].href).search).to.equal("?ref=office");
+      expect(new URL(session.calls[1].href).search).to.equal("");
+      expect(session.calls[0].authorization).to.equal("token " + TOKEN);
+      expectHost(session.calls, "https://github.example/");
+    });
+
+    it("creates a missing GitHub branch from the default branch before writing", async () => {
+      const seen: string[] = [];
+      const session = serve(call => {
+        const url = new URL(call.href);
+        seen.push(call.method + " " + url.pathname + url.search);
+        if (
+          url.pathname.indexOf("/contents/settings-sync.json") !== -1 &&
+          call.method === "GET"
+        ) {
+          return { statusCode: 404, body: { message: "Not Found" } };
+        }
+        if (url.pathname.indexOf("/branches/feature%2Foffice") !== -1) {
+          return { statusCode: 404, body: { message: "Branch not found" } };
+        }
+        if (
+          call.method === "GET" &&
+          url.pathname.endsWith("/repos/me/settings")
+        ) {
+          return {
+            statusCode: 200,
+            body: {
+              default_branch: "release/1",
+              clone_url: "https://attacker.example/me/settings.git"
+            }
+          };
+        }
+        if (url.pathname.indexOf("/git/ref/heads/release%2F1") !== -1) {
+          return {
+            statusCode: 200,
+            body: {
+              ref: "refs/heads/release/1",
+              object: {
+                type: "commit",
+                sha: SHA_A,
+                url: "https://attacker.example/git/commits/" + SHA_A
+              }
+            }
+          };
+        }
+        if (call.method === "POST") {
+          expect(JSON.parse(call.body)).to.deep.equal({
+            ref: "refs/heads/feature/office",
+            sha: SHA_A
+          });
+          return {
+            statusCode: 201,
+            body: {
+              ref: "refs/heads/feature/office",
+              object: {
+                type: "commit",
+                sha: SHA_A,
+                url: "https://attacker.example/ref"
+              }
+            }
+          };
+        }
+        const payload = JSON.parse(call.body);
+        expect(payload.sha).to.equal(undefined);
+        expect(payload.branch).to.equal("feature/office");
+        expect(
+          Buffer.from(payload.content, "base64").toString("utf8")
+        ).to.equal(FILE_TEXT);
+        return {
+          statusCode: 201,
+          body: {
+            content: {
+              path: "settings-sync.json",
+              name: "settings-sync.json",
+              sha: SHA_B
+            }
+          }
+        };
+      });
+      const written = await putSettingsFile(
+        settings("github", "https://git.example/api/v3", TOKEN),
+        fileTarget("me/settings", "feature/office"),
+        FILE_TEXT,
+        { transport: session.transport }
+      );
+      expect(written).to.deep.equal({
+        content: FILE_TEXT,
+        branch: "feature/office",
+        sha: SHA_B
+      });
+      expect(seen).to.deep.equal([
+        "GET /api/v3/repos/me/settings/contents/settings-sync.json?ref=feature%2Foffice",
+        "GET /api/v3/repos/me/settings/branches/feature%2Foffice",
+        "GET /api/v3/repos/me/settings",
+        "GET /api/v3/repos/me/settings/git/ref/heads/release%2F1",
+        "POST /api/v3/repos/me/settings/git/refs",
+        "PUT /api/v3/repos/me/settings/contents/settings-sync.json"
+      ]);
+      expectHost(session.calls, "https://git.example/");
+    });
+
+    it("writes a new GitHub file on an existing branch without creating a ref", async () => {
+      const seen: string[] = [];
+      const session = serve(call => {
+        const url = new URL(call.href);
+        seen.push(call.method + " " + url.pathname);
+        if (
+          call.method === "GET" &&
+          url.pathname.indexOf("/contents/") !== -1
+        ) {
+          return { statusCode: 404, body: { message: "Not Found" } };
+        }
+        if (call.method === "GET") {
+          return {
+            statusCode: 200,
+            body: {
+              name: "office",
+              commit: {
+                sha: SHA_A,
+                url: "https://attacker.example/commits/" + SHA_A
+              }
+            }
+          };
+        }
+        expect(JSON.parse(call.body).sha).to.equal(undefined);
+        return {
+          statusCode: 201,
+          body: { content: { path: "settings-sync.json", sha: SHA_B } }
+        };
+      });
+      const written = await putSettingsFile(
+        settings("github", "https://git.example/api/v3", TOKEN),
+        fileTarget("me/settings", "office"),
+        FILE_TEXT,
+        { transport: session.transport }
+      );
+      expect(written.sha).to.equal(SHA_B);
+      expect(seen).to.deep.equal([
+        "GET /api/v3/repos/me/settings/contents/settings-sync.json",
+        "GET /api/v3/repos/me/settings/branches/office",
+        "PUT /api/v3/repos/me/settings/contents/settings-sync.json"
+      ]);
+      expectHost(session.calls, "https://git.example/");
+    });
+
+    it("writes the first GitHub file when the repository has no default branch", async () => {
+      const seen: string[] = [];
+      const session = serve(call => {
+        const url = new URL(call.href);
+        seen.push(call.method + " " + url.pathname);
+        if (call.method === "PUT") {
+          return {
+            statusCode: 201,
+            body: { content: { path: "settings-sync.json", sha: SHA_B } }
+          };
+        }
+        if (url.pathname.indexOf("/branches/") !== -1) {
+          return { statusCode: 404, body: {} };
+        }
+        if (url.pathname.indexOf("/contents/") !== -1) {
+          return { statusCode: 404, body: {} };
+        }
+        return { statusCode: 200, body: { default_branch: null } };
+      });
+      await putSettingsFile(
+        settings("github", "https://git.example/api/v3", TOKEN),
+        fileTarget("me/settings", "office"),
+        FILE_TEXT,
+        { transport: session.transport }
+      );
+      expect(seen).to.deep.equal([
+        "GET /api/v3/repos/me/settings/contents/settings-sync.json",
+        "GET /api/v3/repos/me/settings/branches/office",
+        "GET /api/v3/repos/me/settings",
+        "PUT /api/v3/repos/me/settings/contents/settings-sync.json"
+      ]);
+      expectHost(session.calls, "https://git.example/");
+    });
+
+    it("downloads settings-sync.json from GitLab Enterprise", async () => {
+      const session = serve(call => {
+        expect(call.privateToken).to.equal(TOKEN);
+        expect(call.authorization).to.equal("");
+        return { statusCode: 200, body: gitlabFile(FILE_TEXT, "office") };
+      });
+      const file = await getSettingsFile(
+        settings("gitlab", "https://gitlab.example/gitlab/api/v4", TOKEN),
+        fileTarget("42", "office"),
+        { transport: session.transport }
+      );
+      expect(file).to.deep.equal({
+        content: FILE_TEXT,
+        branch: "office",
+        sha: SHA_A
+      });
+      expect(session.calls[0].href).to.equal(
+        "https://gitlab.example/gitlab/api/v4/projects/42/repository/files/settings-sync.json?ref=office"
+      );
+      expectHost(session.calls, "https://gitlab.example/");
+    });
+
+    it("rejects a GitLab file response for a different branch", async () => {
+      await expectRejection(
+        getSettingsFile(
+          settings("gitlab", "https://gitlab.example/api/v4", TOKEN),
+          fileTarget("group/settings", "office"),
+          {
+            transport: () => jsonResponse(200, gitlabFile(FILE_TEXT, "main"))
+          }
+        ),
+        "The provider returned a different branch."
+      );
+    });
+
+    it("creates a missing GitLab branch from the default branch before writing", async () => {
+      const seen: string[] = [];
+      const session = serve(call => {
+        const url = new URL(call.href);
+        seen.push(call.method + " " + url.pathname + url.search);
+        expect(call.privateToken).to.equal(TOKEN);
+        expect(call.href.indexOf(TOKEN)).to.equal(-1);
+        if (
+          call.method === "GET" &&
+          url.pathname.indexOf("/repository/files/") !== -1
+        ) {
+          return { statusCode: 404, body: { message: "404" } };
+        }
+        if (
+          call.method === "GET" &&
+          url.pathname.indexOf("/repository/branches/") !== -1
+        ) {
+          return {
+            statusCode: 404,
+            body: {
+              message: "404",
+              web_url: "https://attacker.example/branch"
+            }
+          };
+        }
+        if (call.method === "GET") {
+          return {
+            statusCode: 200,
+            body: {
+              default_branch: "main",
+              http_url_to_repo:
+                "https://attacker.example/group/team/settings.git"
+            }
+          };
+        }
+        if (
+          call.method === "POST" &&
+          url.pathname.indexOf("/repository/branches") !== -1 &&
+          url.pathname.indexOf("/repository/files/") === -1
+        ) {
+          expect(JSON.parse(call.body)).to.deep.equal({
+            branch: "feature/office",
+            ref: "main"
+          });
+          return {
+            statusCode: 201,
+            body: {
+              name: "feature/office",
+              web_url: "https://attacker.example/-/tree/feature/office"
+            }
+          };
+        }
+        expect(JSON.parse(call.body)).to.deep.equal({
+          branch: "feature/office",
+          content: FILE_TEXT,
+          commit_message: "Update settings-sync.json",
+          encoding: "text"
+        });
+        return {
+          statusCode: 201,
+          body: {
+            file_path: "settings-sync.json",
+            branch: "feature/office"
+          }
+        };
+      });
+      const written = await putSettingsFile(
+        settings("gitlab", "https://gitlab.example/api/v4", TOKEN),
+        fileTarget("group/team/settings", "feature/office"),
+        FILE_TEXT,
+        { transport: session.transport }
+      );
+      expect(written).to.deep.equal({
+        content: FILE_TEXT,
+        branch: "feature/office",
+        sha: null
+      });
+      expect(seen).to.deep.equal([
+        "GET /api/v4/projects/group%2Fteam%2Fsettings/repository/files/settings-sync.json?ref=feature%2Foffice",
+        "GET /api/v4/projects/group%2Fteam%2Fsettings/repository/branches/feature%2Foffice",
+        "GET /api/v4/projects/group%2Fteam%2Fsettings",
+        "POST /api/v4/projects/group%2Fteam%2Fsettings/repository/branches",
+        "POST /api/v4/projects/group%2Fteam%2Fsettings/repository/files/settings-sync.json"
+      ]);
+      expectHost(session.calls, "https://gitlab.example/");
+    });
+
+    it("updates an existing GitLab file with PUT", async () => {
+      const methods: string[] = [];
+      const session = serve(call => {
+        methods.push(call.method);
+        expect(call.privateToken).to.equal(TOKEN);
+        if (call.method === "GET") {
+          return { statusCode: 200, body: gitlabFile("old\n", "office") };
+        }
+        expect(JSON.parse(call.body).content).to.equal(FILE_TEXT);
+        return {
+          statusCode: 200,
+          body: { file_path: "settings-sync.json", branch: "office" }
+        };
+      });
+      const written = await putSettingsFile(
+        settings("gitlab", "https://gitlab.example/api/v4", TOKEN),
+        fileTarget("group/settings", "office"),
+        FILE_TEXT,
+        { transport: session.transport }
+      );
+      expect(methods).to.deep.equal(["GET", "PUT"]);
+      expect(written.sha).to.equal(null);
+      expect(session.calls[1].href).to.equal(
+        "https://gitlab.example/api/v4/projects/group%2Fsettings/repository/files/settings-sync.json"
+      );
+      expectHost(session.calls, "https://gitlab.example/");
+    });
+
+    it("does not create a branch when settings-sync.json is missing", async () => {
+      const session = serve(() => ({
+        statusCode: 404,
+        body: { message: "Not Found" }
+      }));
+      await expectRejection(
+        getSettingsFile(
+          settings("github", "https://git.example/api/v3", TOKEN),
+          fileTarget("me/settings", "office"),
+          { transport: session.transport }
+        ),
+        "settings-sync.json was not found on that branch."
+      );
+      expect(session.calls).to.have.length(1);
+    });
+
+    it("does not fetch a cross-origin download URL when the body is omitted", async () => {
+      const session = serve(() => ({
+        statusCode: 200,
+        body: {
+          type: "file",
+          path: "settings-sync.json",
+          name: "settings-sync.json",
+          encoding: "none",
+          size: 12,
+          sha: SHA_A,
+          download_url:
+            "https://attacker.example/settings-sync.json?token=" + TOKEN
+        }
+      }));
+      await expectRejection(
+        getSettingsFile(
+          settings("github", "https://git.example/api/v3", TOKEN),
+          fileTarget("me/settings", "office"),
+          { transport: session.transport }
+        ),
+        "The provider did not return the settings file inline."
+      );
+      expect(session.calls).to.have.length(1);
+      expectHost(session.calls, "https://git.example/");
+    });
+
+    it("does not follow a redirect of a settings read or write", async () => {
+      const read = serve(() => ({
+        statusCode: 302,
+        body: { token: TOKEN },
+        headers: { location: "https://attacker.example/steal" }
+      }));
+      await expectRejection(
+        getSettingsFile(
+          settings("github", "https://git.example/api/v3", TOKEN),
+          fileTarget("me/settings", "office"),
+          { transport: read.transport }
+        ),
+        "The enterprise API redirected the request. Refusing to follow it with the token."
+      );
+      expect(read.calls).to.have.length(1);
+
+      const update = serve(call => {
+        if (call.method === "GET") {
+          return { statusCode: 200, body: gitlabFile("old\n", "office") };
+        }
+        return {
+          statusCode: 307,
+          body: { token: TOKEN },
+          headers: { location: "https://attacker.example/steal" }
+        };
+      });
+      await expectRejection(
+        putSettingsFile(
+          settings("gitlab", "https://gitlab.example/api/v4", TOKEN),
+          fileTarget("group/settings", "office"),
+          FILE_TEXT,
+          { transport: update.transport }
+        ),
+        "The enterprise API redirected the request. Refusing to follow it with the token."
+      );
+      expect(update.calls).to.have.length(2);
+      expectHost(update.calls, "https://gitlab.example/");
+    });
+
+    it("stops when branch lookup is redirected", async () => {
+      const session = serve(call => {
+        const url = new URL(call.href);
+        if (url.pathname.indexOf("/contents/") !== -1) {
+          return { statusCode: 404, body: {} };
+        }
+        if (url.pathname.indexOf("/branches/") !== -1) {
+          return { statusCode: 404, body: {} };
+        }
+        return {
+          statusCode: 301,
+          body: { token: TOKEN },
+          headers: { location: "https://attacker.example/repos/me/settings" }
+        };
+      });
+      await expectRejection(
+        putSettingsFile(
+          settings("github", "https://git.example/api/v3", TOKEN),
+          fileTarget("me/settings", "office"),
+          FILE_TEXT,
+          { transport: session.transport }
+        ),
+        "The enterprise API redirected the request. Refusing to follow it with the token."
+      );
+      expect(session.calls).to.have.length(3);
+      expectHost(session.calls, "https://git.example/");
+    });
+
+    it("does not request a default branch that is a URL", async () => {
+      const session = serve(call => {
+        const url = new URL(call.href);
+        if (url.pathname.indexOf("/contents/") !== -1) {
+          return { statusCode: 404, body: {} };
+        }
+        if (url.pathname.indexOf("/branches/") !== -1) {
+          return { statusCode: 404, body: {} };
+        }
+        return {
+          statusCode: 200,
+          body: { default_branch: "https://attacker.example/main" }
+        };
+      });
+      await expectRejection(
+        putSettingsFile(
+          settings("github", "https://git.example/api/v3", TOKEN),
+          fileTarget("me/settings", "office"),
+          FILE_TEXT,
+          { transport: session.transport }
+        ),
+        "The provider returned an unexpected default branch."
+      );
+      expect(session.calls).to.have.length(3);
+      expectHost(session.calls, "https://git.example/");
+    });
+
+    it("rejects a file response that is not settings-sync.json", async () => {
+      await expectRejection(
+        getSettingsFile(
+          settings("github", "https://git.example/api/v3", TOKEN),
+          fileTarget("me/settings", "office"),
+          {
+            transport: () =>
+              jsonResponse(200, {
+                type: "file",
+                path: "README.md",
+                encoding: "base64",
+                content: wrapBase64("nope"),
+                sha: SHA_A,
+                download_url: "https://attacker.example/README.md"
+              })
+          }
+        ),
+        "The provider did not return settings-sync.json."
+      );
+    });
+
+    it("hides a token echoed by a failed settings upload", async () => {
+      const session = serve(call => {
+        if (call.method === "GET") {
+          return { statusCode: 200, body: githubFile(SHA_A, "old\n") };
+        }
+        return { statusCode: 409, body: { message: TOKEN } };
+      });
+      await expectRejection(
+        putSettingsFile(
+          settings("github", "https://git.example/api/v3", TOKEN),
+          fileTarget("me/settings", "office"),
+          FILE_TEXT,
+          { transport: session.transport }
+        ),
+        "Enterprise API request failed (HTTP 409)."
+      );
+      expect(session.calls).to.have.length(2);
+      expect(session.calls[1].method).to.equal("PUT");
+    });
   });
 });
 
@@ -602,6 +1514,85 @@ function settings(
   token: string = TOKEN
 ): EnterpriseApiSettings {
   return { provider, apiUrl, token };
+}
+
+function fileTarget(
+  repository: string,
+  branch: string
+): EnterpriseSettingsTarget {
+  return { repository, branch };
+}
+
+interface RecordedCall {
+  href: string;
+  method: string;
+  authorization: string;
+  privateToken: string;
+  body: string;
+}
+
+function serve(
+  respond: (
+    call: RecordedCall
+  ) => {
+    statusCode: number;
+    body: unknown;
+    headers?: { [name: string]: string };
+  }
+): { transport: EnterpriseTransport; calls: RecordedCall[] } {
+  const calls: RecordedCall[] = [];
+  const transport: EnterpriseTransport = (url, method, headers, body) => {
+    const call: RecordedCall = {
+      href: url.href,
+      method,
+      authorization: headers.Authorization || "",
+      privateToken: headers["PRIVATE-TOKEN"] || "",
+      body: body || ""
+    };
+    calls.push(call);
+    const result = respond(call);
+    return jsonResponse(result.statusCode, result.body, result.headers);
+  };
+  return { transport, calls };
+}
+
+function expectHost(calls: RecordedCall[], origin: string): void {
+  calls.forEach(call => {
+    expect(call.href.indexOf(TOKEN)).to.equal(-1);
+    expect(call.href.indexOf(origin)).to.equal(0);
+  });
+}
+
+function wrapBase64(text: string): string {
+  const encoded = Buffer.from(text, "utf8").toString("base64");
+  const lines: string[] = [];
+  for (let index = 0; index < encoded.length; index += 60) {
+    lines.push(encoded.substring(index, index + 60));
+  }
+  return lines.join("\n") + "\n";
+}
+
+function githubFile(sha: string, text: string): { [key: string]: unknown } {
+  return {
+    type: "file",
+    name: "settings-sync.json",
+    path: "settings-sync.json",
+    encoding: "base64",
+    content: Buffer.from(text, "utf8").toString("base64"),
+    sha
+  };
+}
+
+function gitlabFile(text: string, ref: string): { [key: string]: unknown } {
+  return {
+    file_name: "settings-sync.json",
+    file_path: "settings-sync.json",
+    encoding: "base64",
+    content: Buffer.from(text, "utf8").toString("base64"),
+    blob_id: SHA_A,
+    ref,
+    size: Buffer.byteLength(text)
+  };
 }
 
 function fixed(

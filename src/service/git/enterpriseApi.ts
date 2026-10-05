@@ -2,18 +2,30 @@ import { request as httpsRequest } from "https";
 import { URL } from "url";
 
 /**
- * Create and list repositories on a GitHub Enterprise or GitLab Enterprise API.
+ * GitHub Enterprise and GitLab Enterprise HTTPS calls for repository sync.
  *
  * `apiUrl` is the API root, such as https://github.example/api/v3 or
  * https://gitlab.example/api/v4. The token is sent only to that origin.
  * Redirects are not followed, and a pagination link on any other origin is
  * refused before a request is opened. HTTPS clone URLs are returned only when
- * their host matches; the token is never copied into them.
+ * their host matches; the token is never copied into them or into errors.
+ *
+ * File transfer is one `settings-sync.json` on a named branch, through the
+ * GitHub Contents API or the GitLab Files API. A missing branch is created
+ * from the repository default branch when that branch exists. The upload
+ * replaces the file with a new commit; it does not rewrite history. Download
+ * URLs and other links in a response are not followed. Certificate
+ * verification stays enabled.
  */
 
 const MAX_RESPONSE_BYTES = 1024 * 1024;
+const MAX_FILE_BYTES = 512 * 1024;
 const MAX_LIST_PAGES = 10;
 const REQUEST_TIMEOUT_MS = 30000;
+const SETTINGS_SYNC_FILE = "settings-sync.json";
+const SETTINGS_COMMIT_MESSAGE = "Update settings-sync.json";
+
+export { SETTINGS_SYNC_FILE };
 
 export interface EnterpriseApiSettings {
   provider: string;
@@ -36,10 +48,23 @@ export interface EnterpriseResponse {
 export interface EnterpriseTransport {
   (
     url: URL,
-    method: "GET" | "POST",
+    method: "GET" | "POST" | "PUT",
     headers: { [name: string]: string },
     body?: string
   ): Promise<EnterpriseResponse>;
+}
+
+export interface EnterpriseSettingsTarget {
+  /** GitHub `owner/name`, or a GitLab project id or `group/name` path. */
+  repository: string;
+  branch: string;
+}
+
+export interface EnterpriseSettingsFile {
+  content: string;
+  branch: string;
+  /** GitHub blob SHA or GitLab blob id. Null when a write response omits it. */
+  sha: string | null;
 }
 
 export interface EnterpriseCallOptions {
@@ -139,6 +164,50 @@ export async function listOwnedRepositories(
   return repositories;
 }
 
+export async function getSettingsFile(
+  settings: EnterpriseApiSettings,
+  target: EnterpriseSettingsTarget,
+  options?: EnterpriseCallOptions
+): Promise<EnterpriseSettingsFile> {
+  const validated = validateSettings(settings);
+  const fileTarget = validateTarget(validated, target);
+  const response = await requestApi(
+    validated,
+    options,
+    settingsFileUrl(validated, fileTarget, true),
+    "GET"
+  );
+  if (response.statusCode === 404) {
+    throw new Error("settings-sync.json was not found on that branch.");
+  }
+  if (response.statusCode !== 200) {
+    throw new Error(httpFailure(response.statusCode));
+  }
+  return parseSettingsFile(validated, response.body, fileTarget.branch);
+}
+
+export async function putSettingsFile(
+  settings: EnterpriseApiSettings,
+  target: EnterpriseSettingsTarget,
+  content: string,
+  options?: EnterpriseCallOptions
+): Promise<EnterpriseSettingsFile> {
+  const validated = validateSettings(settings);
+  const fileTarget = validateTarget(validated, target);
+  assertSettingsText(content);
+  const existing = await readSettingsFile(validated, options, fileTarget);
+  if (!existing) {
+    await ensureBranch(validated, options, fileTarget);
+  }
+  return writeSettingsFile(
+    validated,
+    options,
+    fileTarget,
+    content,
+    existing ? existing.sha : null
+  );
+}
+
 function validateSettings(settings: EnterpriseApiSettings): ValidatedApi {
   if (settings.provider !== "github" && settings.provider !== "gitlab") {
     throw new Error("Select GitHub or GitLab for the enterprise API.");
@@ -190,6 +259,15 @@ function isRepositoryName(name: string): boolean {
 }
 
 function joinApi(api: URL, suffix: string, query?: string): URL {
+  if (
+    suffix.charAt(0) !== "/" ||
+    suffix.indexOf("..") !== -1 ||
+    /[?#\\\s@]/.test(suffix)
+  ) {
+    throw new Error(
+      "Refusing to send the token to an unsafe repository API URL."
+    );
+  }
   const endpoint = new URL(api.href);
   const basePath = endpoint.pathname.replace(/\/+$/, "");
   endpoint.pathname = basePath + suffix;
@@ -242,11 +320,27 @@ function tokenHeaders(validated: ValidatedApi): { [name: string]: string } {
   return headers;
 }
 
+async function requestApi(
+  validated: ValidatedApi,
+  options: EnterpriseCallOptions | undefined,
+  url: URL,
+  method: "GET" | "POST" | "PUT",
+  body?: string
+): Promise<EnterpriseResponse> {
+  const response = await callApi(validated, options, url, method, body);
+  if (isRedirect(response.statusCode)) {
+    throw new Error(
+      "The enterprise API redirected the request. Refusing to follow it with the token."
+    );
+  }
+  return response;
+}
+
 async function callApi(
   validated: ValidatedApi,
   options: EnterpriseCallOptions | undefined,
   url: URL,
-  method: "GET" | "POST",
+  method: "GET" | "POST" | "PUT",
   body?: string
 ): Promise<EnterpriseResponse> {
   assertTokenHost(validated.api, url);
@@ -354,12 +448,11 @@ function httpFailure(statusCode: number): string {
   return "Enterprise API request failed (HTTP " + String(statusCode) + ").";
 }
 
-function parseObject(body: string): { [key: string]: unknown } {
-  const value = parseJson(body);
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    throw new Error("The provider returned an unexpected repository.");
-  }
-  return value as { [key: string]: unknown };
+function parseObject(
+  body: string,
+  message = "The provider returned an unexpected repository."
+): { [key: string]: unknown } {
+  return asRecord(parseJson(body), message);
 }
 
 function parseJson(body: string): unknown {
@@ -503,4 +596,469 @@ function nextPage(
   }
   assertTokenHost(validated.api, url);
   return url;
+}
+
+interface FileTarget {
+  repository: string;
+  branch: string;
+  prefix: string;
+}
+
+interface ExistingSettingsFile {
+  sha: string;
+}
+
+function validateTarget(
+  validated: ValidatedApi,
+  target: EnterpriseSettingsTarget
+): FileTarget {
+  if (
+    !target ||
+    typeof target.repository !== "string" ||
+    typeof target.branch !== "string"
+  ) {
+    throw new Error("Enter a repository and branch for settings-sync.json.");
+  }
+  if (!isBranchName(target.branch)) {
+    throw new Error(
+      "Enter a branch name using letters, numbers, dots, underscores, hyphens, or slashes."
+    );
+  }
+  const prefix = repositoryPrefix(validated, target.repository);
+  if (
+    target.repository.indexOf(validated.token) !== -1 ||
+    target.branch.indexOf(validated.token) !== -1
+  ) {
+    throw new Error(
+      "Refusing to send the token to an unsafe repository API URL."
+    );
+  }
+  return {
+    repository: target.repository,
+    branch: target.branch,
+    prefix
+  };
+}
+
+function repositoryPrefix(validated: ValidatedApi, repository: string): string {
+  if (validated.provider === "github") {
+    const match = /^([A-Za-z0-9][A-Za-z0-9._-]{0,99})\/([A-Za-z0-9][A-Za-z0-9._-]{0,99})$/.exec(
+      repository
+    );
+    if (!match) {
+      throw new Error("Enter a GitHub repository as owner/name.");
+    }
+    return (
+      "/repos/" +
+      encodeURIComponent(match[1]) +
+      "/" +
+      encodeURIComponent(match[2])
+    );
+  }
+  if (/^[1-9][0-9]{0,18}$/.test(repository)) {
+    return "/projects/" + repository;
+  }
+  const parts = repository.split("/");
+  if (
+    parts.length < 2 ||
+    parts.length > 20 ||
+    !parts.every(part => /^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/.test(part))
+  ) {
+    throw new Error("Enter a GitLab project id or group/name.");
+  }
+  return "/projects/" + encodeURIComponent(repository);
+}
+
+function isBranchName(branch: string): boolean {
+  if (
+    branch.length === 0 ||
+    branch.length > 128 ||
+    branch.indexOf("..") !== -1
+  ) {
+    return false;
+  }
+  const parts = branch.split("/");
+  if (parts.length > 10) {
+    return false;
+  }
+  for (let index = 0; index < parts.length; index++) {
+    const part = parts[index];
+    if (
+      !/^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/.test(part) ||
+      part.charAt(part.length - 1) === "." ||
+      /\.lock$/i.test(part)
+    ) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function assertSettingsText(content: string): void {
+  if (typeof content !== "string") {
+    throw new Error("The settings file must be text.");
+  }
+  if (Buffer.byteLength(content) > MAX_FILE_BYTES) {
+    throw new Error("The settings file is too large.");
+  }
+}
+
+function settingsFileUrl(
+  validated: ValidatedApi,
+  target: FileTarget,
+  withRef: boolean
+): URL {
+  const suffix =
+    target.prefix +
+    (validated.provider === "github" ? "/contents/" : "/repository/files/") +
+    SETTINGS_SYNC_FILE;
+  return joinApi(
+    validated.api,
+    suffix,
+    withRef ? "ref=" + encodeURIComponent(target.branch) : undefined
+  );
+}
+
+function branchUrl(validated: ValidatedApi, target: FileTarget): URL {
+  const suffix =
+    target.prefix +
+    (validated.provider === "github" ? "/branches/" : "/repository/branches/") +
+    encodeURIComponent(target.branch);
+  return joinApi(validated.api, suffix);
+}
+
+async function readSettingsFile(
+  validated: ValidatedApi,
+  options: EnterpriseCallOptions | undefined,
+  target: FileTarget
+): Promise<ExistingSettingsFile | null> {
+  const response = await requestApi(
+    validated,
+    options,
+    settingsFileUrl(validated, target, true),
+    "GET"
+  );
+  if (response.statusCode === 404) {
+    return null;
+  }
+  if (response.statusCode !== 200) {
+    throw new Error(httpFailure(response.statusCode));
+  }
+  const file = parseSettingsFile(validated, response.body, target.branch);
+  if (!file.sha) {
+    throw new Error("The provider returned an unexpected file id.");
+  }
+  return { sha: file.sha };
+}
+
+async function ensureBranch(
+  validated: ValidatedApi,
+  options: EnterpriseCallOptions | undefined,
+  target: FileTarget
+): Promise<void> {
+  const probe = await requestApi(
+    validated,
+    options,
+    branchUrl(validated, target),
+    "GET"
+  );
+  if (probe.statusCode === 200) {
+    assertBranchRecord(probe.body, target.branch);
+    return;
+  }
+  if (probe.statusCode !== 404) {
+    throw new Error(httpFailure(probe.statusCode));
+  }
+  const metadata = await requestApi(
+    validated,
+    options,
+    joinApi(validated.api, target.prefix),
+    "GET"
+  );
+  if (metadata.statusCode !== 200) {
+    throw new Error(httpFailure(metadata.statusCode));
+  }
+  const defaultBranch = parseDefaultBranch(metadata.body);
+  if (!defaultBranch) {
+    return;
+  }
+  if (defaultBranch === target.branch) {
+    throw new Error(
+      "The repository has no default branch to create the requested branch from."
+    );
+  }
+  await createBranch(validated, options, target, defaultBranch);
+}
+
+async function createBranch(
+  validated: ValidatedApi,
+  options: EnterpriseCallOptions | undefined,
+  target: FileTarget,
+  defaultBranch: string
+): Promise<void> {
+  if (validated.provider === "github") {
+    const current = await requestApi(
+      validated,
+      options,
+      joinApi(
+        validated.api,
+        target.prefix + "/git/ref/heads/" + encodeURIComponent(defaultBranch)
+      ),
+      "GET"
+    );
+    if (current.statusCode !== 200) {
+      throw new Error(httpFailure(current.statusCode));
+    }
+    const sha = parseCommitSha(current.body);
+    const created = await requestApi(
+      validated,
+      options,
+      joinApi(validated.api, target.prefix + "/git/refs"),
+      "POST",
+      JSON.stringify({
+        ref: "refs/heads/" + target.branch,
+        sha
+      })
+    );
+    if (created.statusCode !== 201) {
+      throw new Error(httpFailure(created.statusCode));
+    }
+    assertCreatedRef(created.body, target.branch, sha);
+    return;
+  }
+  const created = await requestApi(
+    validated,
+    options,
+    joinApi(validated.api, target.prefix + "/repository/branches"),
+    "POST",
+    JSON.stringify({
+      branch: target.branch,
+      ref: defaultBranch
+    })
+  );
+  if (created.statusCode !== 201) {
+    throw new Error(httpFailure(created.statusCode));
+  }
+  assertBranchRecord(created.body, target.branch);
+}
+
+async function writeSettingsFile(
+  validated: ValidatedApi,
+  options: EnterpriseCallOptions | undefined,
+  target: FileTarget,
+  content: string,
+  sha: string | null
+): Promise<EnterpriseSettingsFile> {
+  if (validated.provider === "github") {
+    const payload: { [key: string]: string } = {
+      message: SETTINGS_COMMIT_MESSAGE,
+      content: Buffer.from(content, "utf8").toString("base64"),
+      branch: target.branch
+    };
+    if (sha) {
+      payload.sha = sha;
+    }
+    const response = await requestApi(
+      validated,
+      options,
+      settingsFileUrl(validated, target, false),
+      "PUT",
+      JSON.stringify(payload)
+    );
+    if (response.statusCode !== 200 && response.statusCode !== 201) {
+      throw new Error(httpFailure(response.statusCode));
+    }
+    return {
+      content,
+      branch: target.branch,
+      sha: parseGithubWriteSha(response.body)
+    };
+  }
+  const response = await requestApi(
+    validated,
+    options,
+    settingsFileUrl(validated, target, false),
+    sha ? "PUT" : "POST",
+    JSON.stringify({
+      branch: target.branch,
+      content,
+      commit_message: SETTINGS_COMMIT_MESSAGE,
+      encoding: "text"
+    })
+  );
+  if (response.statusCode !== 200 && response.statusCode !== 201) {
+    throw new Error(httpFailure(response.statusCode));
+  }
+  parseGitlabWrite(response.body, target.branch);
+  return {
+    content,
+    branch: target.branch,
+    sha: null
+  };
+}
+
+function parseSettingsFile(
+  validated: ValidatedApi,
+  body: string,
+  branch: string
+): EnterpriseSettingsFile {
+  const record = parseObject(
+    body,
+    "The provider did not return settings-sync.json."
+  );
+  const shaField = validated.provider === "github" ? "sha" : "blob_id";
+  if (validated.provider === "github") {
+    if (record.type !== undefined && record.type !== "file") {
+      throw new Error("The provider did not return settings-sync.json.");
+    }
+    assertFilePath(record, "path", "name");
+  } else {
+    assertFilePath(record, "file_path", "file_name");
+    if (typeof record.ref === "string" && record.ref !== branch) {
+      throw new Error("The provider returned a different branch.");
+    }
+  }
+  if (record.encoding !== "base64") {
+    throw new Error("The provider did not return the settings file inline.");
+  }
+  return {
+    content: decodeBase64Content(record.content),
+    branch,
+    sha: requiredSha(
+      record[shaField],
+      "The provider returned an unexpected file id."
+    )
+  };
+}
+
+function assertFilePath(
+  record: { [key: string]: unknown },
+  pathKey: string,
+  nameKey: string
+): void {
+  if (record[pathKey] !== SETTINGS_SYNC_FILE) {
+    throw new Error("The provider did not return settings-sync.json.");
+  }
+  if (record[nameKey] !== undefined && record[nameKey] !== SETTINGS_SYNC_FILE) {
+    throw new Error("The provider did not return settings-sync.json.");
+  }
+}
+
+function decodeBase64Content(value: unknown): string {
+  if (typeof value !== "string" || /[^A-Za-z0-9+/=\s]/.test(value)) {
+    throw new Error("The provider did not return the settings file inline.");
+  }
+  const compact = value.replace(/\s+/g, "");
+  if (compact.length % 4 !== 0) {
+    throw new Error("The provider did not return the settings file inline.");
+  }
+  const decoded = Buffer.from(compact, "base64");
+  if (decoded.length > MAX_FILE_BYTES) {
+    throw new Error("The settings file is too large.");
+  }
+  const text = decoded.toString("utf8");
+  if (!decoded.equals(Buffer.from(text, "utf8"))) {
+    throw new Error("The provider did not return the settings file as text.");
+  }
+  return text;
+}
+
+function requiredSha(value: unknown, message: string): string {
+  if (typeof value !== "string" || !/^[a-f0-9]{40}$/i.test(value)) {
+    throw new Error(message);
+  }
+  return value.toLowerCase();
+}
+
+function parseGithubWriteSha(body: string): string {
+  const record = parseObject(
+    body,
+    "The provider did not return settings-sync.json."
+  );
+  const content = asRecord(
+    record.content,
+    "The provider did not return settings-sync.json."
+  );
+  assertFilePath(content, "path", "name");
+  return requiredSha(
+    content.sha,
+    "The provider returned an unexpected file id."
+  );
+}
+
+function parseGitlabWrite(body: string, branch: string): void {
+  const record = parseObject(
+    body,
+    "The provider did not return settings-sync.json."
+  );
+  assertFilePath(record, "file_path", "file_name");
+  if (record.branch !== branch) {
+    throw new Error("The provider returned a different branch.");
+  }
+}
+
+function assertBranchRecord(body: string, branch: string): void {
+  const record = parseObject(
+    body,
+    "The provider returned an unexpected branch."
+  );
+  if (record.name !== branch) {
+    throw new Error("The provider returned a different branch.");
+  }
+}
+
+function parseDefaultBranch(body: string): string | null {
+  const record = parseObject(
+    body,
+    "The provider returned an unexpected repository."
+  );
+  if (record.default_branch === null || record.default_branch === undefined) {
+    return null;
+  }
+  if (
+    typeof record.default_branch !== "string" ||
+    !isBranchName(record.default_branch)
+  ) {
+    throw new Error("The provider returned an unexpected default branch.");
+  }
+  return record.default_branch;
+}
+
+function parseCommitSha(body: string): string {
+  const record = parseObject(
+    body,
+    "The provider returned an unexpected commit."
+  );
+  const object = asRecord(
+    record.object,
+    "The provider returned an unexpected commit."
+  );
+  if (object.type !== undefined && object.type !== "commit") {
+    throw new Error("The provider returned an unexpected commit.");
+  }
+  return requiredSha(object.sha, "The provider returned an unexpected commit.");
+}
+
+function assertCreatedRef(body: string, branch: string, sha: string): void {
+  const record = parseObject(
+    body,
+    "The provider returned an unexpected branch."
+  );
+  if (record.ref !== "refs/heads/" + branch) {
+    throw new Error("The provider returned a different branch.");
+  }
+  const object = asRecord(
+    record.object,
+    "The provider returned an unexpected branch."
+  );
+  if (typeof object.sha !== "string" || object.sha.toLowerCase() !== sha) {
+    throw new Error("The provider returned a different commit.");
+  }
+}
+
+function asRecord(value: unknown, message: string): { [key: string]: unknown } {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error(message);
+  }
+  return value as { [key: string]: unknown };
 }
