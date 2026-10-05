@@ -3,9 +3,9 @@ import { expect } from "chai";
 import {
   DownloadChangeService,
   IDownloadFileChange
-} from "../../../src/service/download-change.service";
-import { File } from "../../../src/service/file.service";
-import { ExtensionInformation } from "../../../src/service/plugin.service";
+} from "../../src/service/download-change.service";
+import { File } from "../../src/service/file.service";
+import { ExtensionInformation } from "../../src/service/plugin.service";
 
 function file(gistName: string): File {
   return new File(gistName, "remote", "", gistName);
