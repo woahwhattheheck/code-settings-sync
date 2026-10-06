@@ -26,32 +26,32 @@ export class WebviewService {
       correspondingSetting: "githubSettings.enterpriseUrl"
     },
     {
-      name: localize("ext.globalConfig.repositoryProvider.name"),
-      placeholder: localize("ext.globalConfig.repositoryProvider.placeholder"),
+      name: "Repository Provider",
+      placeholder: "Enter github or gitlab",
       type: UISettingType.TextInput,
       correspondingSetting: "repositorySync.provider"
     },
     {
-      name: localize("ext.globalConfig.repositoryApiUrl.name"),
-      placeholder: localize("ext.globalConfig.repositoryApiUrl.placeholder"),
+      name: "Repository API URL",
+      placeholder: "Enter the GitHub or GitLab API root",
       type: UISettingType.TextInput,
       correspondingSetting: "repositorySync.apiUrl"
     },
     {
-      name: localize("ext.globalConfig.repositoryToken.name"),
-      placeholder: localize("ext.globalConfig.repositoryToken.placeholder"),
+      name: "Repository Credential",
+      placeholder: "Enter repository credential",
       type: UISettingType.TextInput,
       correspondingSetting: "repositorySync.token"
     },
     {
-      name: localize("ext.globalConfig.repository.name"),
-      placeholder: localize("ext.globalConfig.repository.placeholder"),
+      name: "Repository",
+      placeholder: "Enter owner/name or group/name",
       type: UISettingType.TextInput,
       correspondingSetting: "repositorySync.repository"
     },
     {
-      name: localize("ext.globalConfig.repositoryBranch.name"),
-      placeholder: localize("ext.globalConfig.repositoryBranch.placeholder"),
+      name: "Repository Branch / Profile",
+      placeholder: "Enter branch name (for example master or office)",
       type: UISettingType.TextInput,
       correspondingSetting: "repositorySync.branch"
     },
