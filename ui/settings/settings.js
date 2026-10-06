@@ -95,6 +95,14 @@ const textareaTemplate = `<div class="form-group mb-3">
 const globalParent = document.getElementById("globalSettings");
 const envParent = document.getElementById("environmentSettings");
 const saveStatus = document.getElementById("saveStatus");
+const createRepository = document.getElementById("createRepository");
+
+if (createRepository) {
+  createRepository.addEventListener("click", () => {
+    save();
+    vscode.postMessage({ command: "createRepository" });
+  });
+}
 
 globalMap.forEach(settingMap => {
   let template;

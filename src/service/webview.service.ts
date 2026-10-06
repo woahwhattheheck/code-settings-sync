@@ -9,6 +9,7 @@ import { ExtensionConfig } from "../models/extensionConfig.model";
 import { UISettingType } from "../models/settingType.model";
 import { IWebview } from "../models/webview.model";
 import { state } from "../state";
+import { createPrivateRepository } from "./git/enterpriseApi";
 import { GitHubOAuthService } from "./github/github.oauth.service";
 
 export class WebviewService {
@@ -283,6 +284,34 @@ export class WebviewService {
     );
     settingsPanel.webview.html = content;
     settingsPanel.webview.onDidReceiveMessage(async message => {
+      if (message && message.command === "createRepository") {
+        try {
+          const customConfig = await state.commons.GetCustomSettings();
+          const repository = customConfig.repositorySync;
+          const created = await createPrivateRepository(
+            {
+              provider: repository.provider,
+              apiUrl: repository.apiUrl,
+              token: repository.token
+            },
+            String(repository.repository || "").trim()
+          );
+          repository.remoteUrl = created.cloneUrl;
+          repository.mode = "repository";
+          if (!(await state.commons.SetCustomSettings(customConfig))) {
+            throw new Error(
+              "Repository created, but the repository-sync settings could not be saved."
+            );
+          }
+          this.UpdateSettingsPage(customConfig, extSettings);
+          vscode.window.showInformationMessage(
+            "Sync: Private repository created and selected for repository sync."
+          );
+        } catch (error) {
+          Commons.LogException(error, state.commons.ERROR_MESSAGE, true);
+        }
+        return;
+      }
       if (message === "openGist") {
         const [customConfig, extConfig] = await Promise.all([
           state.commons.GetCustomSettings(),
