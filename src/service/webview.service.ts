@@ -25,6 +25,36 @@ export class WebviewService {
       type: UISettingType.TextInput,
       correspondingSetting: "githubSettings.enterpriseUrl"
     },
+    {
+      name: localize("ext.globalConfig.repositoryProvider.name"),
+      placeholder: localize("ext.globalConfig.repositoryProvider.placeholder"),
+      type: UISettingType.TextInput,
+      correspondingSetting: "repositorySync.provider"
+    },
+    {
+      name: localize("ext.globalConfig.repositoryApiUrl.name"),
+      placeholder: localize("ext.globalConfig.repositoryApiUrl.placeholder"),
+      type: UISettingType.TextInput,
+      correspondingSetting: "repositorySync.apiUrl"
+    },
+    {
+      name: localize("ext.globalConfig.repositoryToken.name"),
+      placeholder: localize("ext.globalConfig.repositoryToken.placeholder"),
+      type: UISettingType.TextInput,
+      correspondingSetting: "repositorySync.token"
+    },
+    {
+      name: localize("ext.globalConfig.repository.name"),
+      placeholder: localize("ext.globalConfig.repository.placeholder"),
+      type: UISettingType.TextInput,
+      correspondingSetting: "repositorySync.repository"
+    },
+    {
+      name: localize("ext.globalConfig.repositoryBranch.name"),
+      placeholder: localize("ext.globalConfig.repositoryBranch.placeholder"),
+      type: UISettingType.TextInput,
+      correspondingSetting: "repositorySync.branch"
+    },
 
     {
       name: localize("ext.globalConfig.ignoreUploadFolders.name"),
