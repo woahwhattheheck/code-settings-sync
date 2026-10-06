@@ -13,9 +13,11 @@ import { URL } from "url";
  * File transfer is one `settings-sync.json` on a named branch, through the
  * GitHub Contents API or the GitLab Files API. A missing branch is created
  * from the repository default branch when that branch exists. The upload
- * replaces the file with a new commit; it does not rewrite history. Download
- * URLs and other links in a response are not followed. Certificate
- * verification stays enabled.
+ * replaces the file with a new commit; it does not rewrite history. A GitHub
+ * contents update that returns HTTP 409 is retried once with the blob SHA
+ * from a fresh read of the same file. A GitLab write is followed by one read
+ * when the write response has no blob id. Download URLs and other links in a
+ * response are not followed. Certificate verification stays enabled.
  */
 
 const MAX_RESPONSE_BYTES = 1024 * 1024;
@@ -63,7 +65,7 @@ export interface EnterpriseSettingsTarget {
 export interface EnterpriseSettingsFile {
   content: string;
   branch: string;
-  /** GitHub blob SHA or GitLab blob id. Null when a write response omits it. */
+  /** GitHub blob SHA or GitLab blob id. Null when the provider did not return one. */
   sha: string | null;
 }
 
@@ -850,29 +852,14 @@ async function writeSettingsFile(
   sha: string | null
 ): Promise<EnterpriseSettingsFile> {
   if (validated.provider === "github") {
-    const payload: { [key: string]: string } = {
-      message: SETTINGS_COMMIT_MESSAGE,
-      content: Buffer.from(content, "utf8").toString("base64"),
-      branch: target.branch
-    };
-    if (sha) {
-      payload.sha = sha;
-    }
-    const response = await requestApi(
+    return putGithubSettingsFile(
       validated,
       options,
-      settingsFileUrl(validated, target, false),
-      "PUT",
-      JSON.stringify(payload)
-    );
-    if (response.statusCode !== 200 && response.statusCode !== 201) {
-      throw new Error(httpFailure(response.statusCode));
-    }
-    return {
+      target,
       content,
-      branch: target.branch,
-      sha: parseGithubWriteSha(response.body)
-    };
+      sha,
+      false
+    );
   }
   const response = await requestApi(
     validated,
@@ -890,10 +877,58 @@ async function writeSettingsFile(
     throw new Error(httpFailure(response.statusCode));
   }
   parseGitlabWrite(response.body, target.branch);
+  const confirmed = await readSettingsFile(validated, options, target);
   return {
     content,
     branch: target.branch,
-    sha: null
+    sha: confirmed ? confirmed.sha : null
+  };
+}
+
+async function putGithubSettingsFile(
+  validated: ValidatedApi,
+  options: EnterpriseCallOptions | undefined,
+  target: FileTarget,
+  content: string,
+  sha: string | null,
+  retried: boolean
+): Promise<EnterpriseSettingsFile> {
+  const payload: { [key: string]: string } = {
+    message: SETTINGS_COMMIT_MESSAGE,
+    content: Buffer.from(content, "utf8").toString("base64"),
+    branch: target.branch
+  };
+  if (sha) {
+    payload.sha = sha;
+  }
+  const response = await requestApi(
+    validated,
+    options,
+    settingsFileUrl(validated, target, false),
+    "PUT",
+    JSON.stringify(payload)
+  );
+  if (response.statusCode === 409 && !retried) {
+    const current = await readSettingsFile(validated, options, target);
+    if (!current) {
+      throw new Error(httpFailure(409));
+    }
+    return putGithubSettingsFile(
+      validated,
+      options,
+      target,
+      content,
+      current.sha,
+      true
+    );
+  }
+  if (response.statusCode !== 200 && response.statusCode !== 201) {
+    throw new Error(httpFailure(response.statusCode));
+  }
+  return {
+    content,
+    branch: target.branch,
+    sha: parseGithubWriteSha(response.body)
   };
 }
 

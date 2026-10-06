@@ -20,6 +20,7 @@ import {
 const TOKEN = "local-enterprise-token";
 const SHA_A = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const SHA_B = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+const SHA_C = "cccccccccccccccccccccccccccccccccccccccc";
 const FILE_TEXT = '{"version":1,"label":"caf\u00e9"}\n';
 
 describe("enterprise repository API", () => {
@@ -669,6 +670,7 @@ describe("enterprise repository API", () => {
 
     it("creates a GitLab branch and writes settings-sync.json", async () => {
       const content = '{"office":true}\n';
+      let fileReads = 0;
       const server = await listen(certificate, hit => {
         expect(hit.privateToken).to.equal(TOKEN);
         expect(hit.authorization).to.equal("");
@@ -677,6 +679,10 @@ describe("enterprise repository API", () => {
           hit.method === "GET" &&
           hit.url.indexOf("/repository/files/") !== -1
         ) {
+          fileReads++;
+          if (fileReads > 1) {
+            return json(200, gitlabFile(content, "office"));
+          }
           return json(404, { message: "404 File Not Found" });
         }
         if (
@@ -724,9 +730,9 @@ describe("enterprise repository API", () => {
         expect(written).to.deep.equal({
           content,
           branch: "office",
-          sha: null
+          sha: SHA_A
         });
-        expect(server.hits).to.have.length(5);
+        expect(server.hits).to.have.length(6);
       } finally {
         await server.close();
       }
@@ -1216,6 +1222,7 @@ describe("enterprise repository API", () => {
 
     it("creates a missing GitLab branch from the default branch before writing", async () => {
       const seen: string[] = [];
+      let fileReads = 0;
       const session = serve(call => {
         const url = new URL(call.href);
         seen.push(call.method + " " + url.pathname + url.search);
@@ -1225,6 +1232,13 @@ describe("enterprise repository API", () => {
           call.method === "GET" &&
           url.pathname.indexOf("/repository/files/") !== -1
         ) {
+          fileReads++;
+          if (fileReads > 1) {
+            return {
+              statusCode: 200,
+              body: gitlabFile(FILE_TEXT, "feature/office")
+            };
+          }
           return { statusCode: 404, body: { message: "404" } };
         }
         if (
@@ -1289,14 +1303,15 @@ describe("enterprise repository API", () => {
       expect(written).to.deep.equal({
         content: FILE_TEXT,
         branch: "feature/office",
-        sha: null
+        sha: SHA_A
       });
       expect(seen).to.deep.equal([
         "GET /api/v4/projects/group%2Fteam%2Fsettings/repository/files/settings-sync.json?ref=feature%2Foffice",
         "GET /api/v4/projects/group%2Fteam%2Fsettings/repository/branches/feature%2Foffice",
         "GET /api/v4/projects/group%2Fteam%2Fsettings",
         "POST /api/v4/projects/group%2Fteam%2Fsettings/repository/branches",
-        "POST /api/v4/projects/group%2Fteam%2Fsettings/repository/files/settings-sync.json"
+        "POST /api/v4/projects/group%2Fteam%2Fsettings/repository/files/settings-sync.json",
+        "GET /api/v4/projects/group%2Fteam%2Fsettings/repository/files/settings-sync.json?ref=feature%2Foffice"
       ]);
       expectHost(session.calls, "https://gitlab.example/");
     });
@@ -1321,8 +1336,8 @@ describe("enterprise repository API", () => {
         FILE_TEXT,
         { transport: session.transport }
       );
-      expect(methods).to.deep.equal(["GET", "PUT"]);
-      expect(written.sha).to.equal(null);
+      expect(methods).to.deep.equal(["GET", "PUT", "GET"]);
+      expect(written.sha).to.equal(SHA_A);
       expect(session.calls[1].href).to.equal(
         "https://gitlab.example/api/v4/projects/group%2Fsettings/repository/files/settings-sync.json"
       );
@@ -1486,6 +1501,124 @@ describe("enterprise repository API", () => {
       );
     });
 
+    it("retries a stale GitHub upload once with the fresh blob sha", async () => {
+      const shas: string[] = [];
+      let reads = 0;
+      const session = serve(call => {
+        expect(new URL(call.href).hostname).to.equal("git.example");
+        if (call.method === "GET") {
+          reads++;
+          const body = githubFile(reads === 1 ? SHA_A : SHA_B, "old\n");
+          body.download_url =
+            "https://attacker.example/settings-sync.json?token=" + TOKEN;
+          return { statusCode: 200, body };
+        }
+        const payload = JSON.parse(call.body);
+        shas.push(payload.sha);
+        if (shas.length === 1) {
+          return { statusCode: 409, body: { message: TOKEN } };
+        }
+        return {
+          statusCode: 200,
+          body: {
+            content: {
+              path: "settings-sync.json",
+              sha: SHA_C,
+              download_url: "https://attacker.example/file"
+            }
+          }
+        };
+      });
+      const written = await putSettingsFile(
+        settings("github", "https://git.example/api/v3", TOKEN),
+        fileTarget("me/settings", "office"),
+        FILE_TEXT,
+        { transport: session.transport }
+      );
+      expect(written).to.deep.equal({
+        content: FILE_TEXT,
+        branch: "office",
+        sha: SHA_C
+      });
+      expect(shas).to.deep.equal([SHA_A, SHA_B]);
+      expect(
+        session.calls.map(
+          call => call.method + " " + new URL(call.href).pathname
+        )
+      ).to.deep.equal([
+        "GET /api/v3/repos/me/settings/contents/settings-sync.json",
+        "PUT /api/v3/repos/me/settings/contents/settings-sync.json",
+        "GET /api/v3/repos/me/settings/contents/settings-sync.json",
+        "PUT /api/v3/repos/me/settings/contents/settings-sync.json"
+      ]);
+      expectHost(session.calls, "https://git.example/");
+    });
+
+    it("stops after a second stale GitHub upload", async () => {
+      const shas: string[] = [];
+      let reads = 0;
+      const session = serve(call => {
+        if (call.method === "GET") {
+          reads++;
+          return {
+            statusCode: 200,
+            body: githubFile(reads === 1 ? SHA_A : SHA_B, "old\n")
+          };
+        }
+        shas.push(JSON.parse(call.body).sha);
+        return { statusCode: 409, body: { message: TOKEN } };
+      });
+      await expectRejection(
+        putSettingsFile(
+          settings("github", "https://git.example/api/v3", TOKEN),
+          fileTarget("me/settings", "office"),
+          FILE_TEXT,
+          { transport: session.transport }
+        ),
+        "Enterprise API request failed (HTTP 409)."
+      );
+      expect(shas).to.deep.equal([SHA_A, SHA_B]);
+      expect(session.calls.map(call => call.method)).to.deep.equal([
+        "GET",
+        "PUT",
+        "GET",
+        "PUT"
+      ]);
+      expectHost(session.calls, "https://git.example/");
+    });
+
+    it("does not retry a GitHub upload when the fresh read is redirected", async () => {
+      let puts = 0;
+      let reads = 0;
+      const session = serve(call => {
+        if (call.method === "PUT") {
+          puts++;
+          return { statusCode: 409, body: { message: "conflict" } };
+        }
+        reads++;
+        if (reads === 1) {
+          return { statusCode: 200, body: githubFile(SHA_A, "old\n") };
+        }
+        return {
+          statusCode: 302,
+          body: { token: TOKEN },
+          headers: { location: "https://attacker.example/steal" }
+        };
+      });
+      await expectRejection(
+        putSettingsFile(
+          settings("github", "https://git.example/api/v3", TOKEN),
+          fileTarget("me/settings", "office"),
+          FILE_TEXT,
+          { transport: session.transport }
+        ),
+        "The enterprise API redirected the request. Refusing to follow it with the token."
+      );
+      expect(puts).to.equal(1);
+      expect(session.calls).to.have.length(3);
+      expectHost(session.calls, "https://git.example/");
+    });
+
     it("hides a token echoed by a failed settings upload", async () => {
       const session = serve(call => {
         if (call.method === "GET") {
@@ -1502,8 +1635,12 @@ describe("enterprise repository API", () => {
         ),
         "Enterprise API request failed (HTTP 409)."
       );
-      expect(session.calls).to.have.length(2);
-      expect(session.calls[1].method).to.equal("PUT");
+      expect(session.calls.map(call => call.method)).to.deep.equal([
+        "GET",
+        "PUT",
+        "GET",
+        "PUT"
+      ]);
     });
   });
 });
