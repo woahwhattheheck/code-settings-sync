@@ -26,6 +26,12 @@ export class WebviewService {
       correspondingSetting: "githubSettings.enterpriseUrl"
     },
     {
+      name: "Sync Storage",
+      placeholder: "Enter gist or repository",
+      type: UISettingType.TextInput,
+      correspondingSetting: "repositorySync.mode"
+    },
+    {
       name: "Repository Provider",
       placeholder: "Enter github or gitlab",
       type: UISettingType.TextInput,
@@ -48,6 +54,12 @@ export class WebviewService {
       placeholder: "Enter owner/name or group/name",
       type: UISettingType.TextInput,
       correspondingSetting: "repositorySync.repository"
+    },
+    {
+      name: "Repository Remote URL",
+      placeholder: "Enter an HTTPS, SSH, or local Git repository URL",
+      type: UISettingType.TextInput,
+      correspondingSetting: "repositorySync.remoteUrl"
     },
     {
       name: "Repository Branch / Profile",

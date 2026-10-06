@@ -16,6 +16,7 @@ export class CustomConfig {
     "gpm-recentItems.json",
   ];
   public ignoreUploadFolders: string[] = [
+    ".git",
     "workspaceStorage",
     "globalStorage",
     "History",
