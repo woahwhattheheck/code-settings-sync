@@ -84,7 +84,7 @@ export function repositorySettingsFromMessage(
   return setting;
 }
 
-function validateBranch(raw: string, branch: string): void {
+export function validateBranch(raw: string, branch: string): void {
   if (
     !branch ||
     branch === "HEAD" ||

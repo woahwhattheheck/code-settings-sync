@@ -3,7 +3,7 @@ import * as fs from "fs-extra";
 import * as path from "path";
 import * as vscode from "vscode";
 import { CustomConfig } from "../../models/customConfig.model";
-import { validateRemote } from "./repositorySettings";
+import { validateBranch, validateRemote } from "./repositorySettings";
 import { ISyncService } from "../../models/ISyncService.model";
 import { IExtensionState } from "../../models/state.model";
 
@@ -301,10 +301,11 @@ export class GitRepositorySyncService implements ISyncService {
   }
 
   private branch(value: string): string {
-    const branch = String(value || "").trim();
-    if (!branch || /[\0\r\n]/.test(branch)) {
-      throw new Error("Configure a repository branch/profile before syncing.");
-    }
+    const raw = String(value || "");
+    const branch = raw.trim();
+    // Persisted or legacy configuration can bypass the settings page. Enforce
+    // the same branch grammar at the Git I/O boundary as at save time.
+    validateBranch(raw, branch);
     return branch;
   }
 }

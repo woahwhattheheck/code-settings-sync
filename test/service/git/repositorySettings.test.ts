@@ -218,6 +218,47 @@ describe("repository settings messages", () => {
     );
   });
 
+  it("enforces saved branch grammar on loaded runtime configuration", async () => {
+    const rejected = [
+      "HEAD",
+      "@",
+      "-unsafe",
+      "work space",
+      "work..office",
+      "work@{1}",
+      "work.lock",
+      "work/",
+      ".work",
+    ];
+    for (const branch of rejected) {
+      const state: any = {
+        commons: {
+          GetCustomSettings: async () => ({
+            repositorySync: {
+              mode: "repository",
+              remoteUrl: "../settings.git",
+              branch,
+            },
+          }),
+        },
+      };
+      expect(await new GitRepositorySyncService(state).IsConfigured()).to.equal(false);
+    }
+
+    const state: any = {
+      commons: {
+        GetCustomSettings: async () => ({
+          repositorySync: {
+            mode: "repository",
+            remoteUrl: "../settings.git",
+            branch: "teams/office",
+          },
+        }),
+      },
+    };
+    expect(await new GitRepositorySyncService(state).IsConfigured()).to.equal(true);
+  });
+
   it("enforces the settings remote allowlist on loaded runtime configuration", async () => {
     const rejected = [
       "ext::unapproved-helper",
