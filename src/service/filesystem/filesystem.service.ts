@@ -335,6 +335,7 @@ export class FileSystemService implements ISyncService {
 
     const metadata = await store.ReadMetadata();
     let folderFiles = await store.ListFiles(customSettings);
+    let declaredFiles: Set<string> | null = null;
     // A completed folder export writes the file manifest last. Do not restore
     // undeclared JSON files added by another process, or mark an incomplete
     // export as downloaded when one of its recorded files disappeared.
@@ -359,6 +360,7 @@ export class FileSystemService implements ISyncService {
       if (declared.size === 0) {
         throw new Error("Sync: Export manifest contains no settings files.");
       }
+      declaredFiles = declared;
     }
     if (!metadata && folderFiles.length === 0) {
       throw new Error(
@@ -407,7 +409,14 @@ export class FileSystemService implements ISyncService {
       );
     }
     for (const key of Object.keys(customSettings.customFiles)) {
-      const content = await store.ReadFile(CUSTOM_PREFIX + key);
+      const name = CUSTOM_PREFIX + key;
+      // Custom files are restored outside USER_FOLDER, so they must obey
+      // the same completed-export manifest as ordinary settings files.
+      // A missing manifest retains preexisting legacy folder behavior.
+      if (declaredFiles && !declaredFiles.has(name)) {
+        continue;
+      }
+      const content = await store.ReadFile(name);
       if (content) {
         updatedFiles.push(
           new File(
