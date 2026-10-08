@@ -267,8 +267,13 @@ export class GitRepositorySyncService implements ISyncService {
     const existing = (await fs.pathExists(excludePath))
       ? await fs.readFile(excludePath, "utf8")
       : "";
-    const pattern = new RegExp(start + "[\\s\\S]*?" + end + "\\n?", "g");
-    const unmanaged = existing.replace(pattern, "").trim();
+    const pattern = new RegExp(
+      start + "[\\s\\S]*?" + end + "(?:\\r?\\n)?",
+      "g"
+    );
+    const unmanaged = existing.replace(pattern, "");
+    const separator =
+      unmanaged && !/[\\r\\n]$/.test(unmanaged) ? "\n" : "";
     const managed = [
       start,
       ...customSettings.ignoreUploadFiles,
@@ -283,10 +288,7 @@ export class GitRepositorySyncService implements ISyncService {
       ""
     ].join("\n");
     await fs.ensureDir(path.dirname(excludePath));
-    await fs.writeFile(
-      excludePath,
-      (unmanaged ? unmanaged + "\n" : "") + managed
-    );
+    await fs.writeFile(excludePath, unmanaged + separator + managed);
   }
 
   private remote(value: string): string {
