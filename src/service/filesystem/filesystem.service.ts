@@ -25,6 +25,7 @@ import {
   HasNewerExport,
   ImportName,
   IsUpToDate,
+  METADATA_FILE,
   KEYBINDINGS,
   KEYBINDINGS_MAC,
   ToFileName,
@@ -333,7 +334,32 @@ export class FileSystemService implements ISyncService {
     );
 
     const metadata = await store.ReadMetadata();
-    const folderFiles = await store.ListFiles(customSettings);
+    let folderFiles = await store.ListFiles(customSettings);
+    // A completed folder export writes the file manifest last. Do not restore
+    // undeclared JSON files added by another process, or mark an incomplete
+    // export as downloaded when one of its recorded files disappeared.
+    if (metadata && metadata.files !== undefined) {
+      if (!Array.isArray(metadata.files)) {
+        throw new Error("Sync: Export file manifest is invalid.");
+      }
+      const declared = new Set<string>();
+      for (const name of metadata.files) {
+        if (typeof name !== "string" || name === METADATA_FILE ||
+            declared.has(name)) {
+          throw new Error("Sync: Export file manifest has invalid or duplicate names.");
+        }
+        // Reuse the store's traversal and symlink-safe path checks.
+        ToRelativePath(name);
+        declared.add(name);
+        if ((await store.ReadFile(name)) === null) {
+          throw new Error("Sync: Export is incomplete; a listed settings file is missing.");
+        }
+      }
+      folderFiles = folderFiles.filter(file => declared.has(file.name));
+      if (declared.size === 0) {
+        throw new Error("Sync: Export manifest contains no settings files.");
+      }
+    }
     if (!metadata && folderFiles.length === 0) {
       throw new Error(
         localize("cmd.downloadSettings.error.emptyFolder", folder)
