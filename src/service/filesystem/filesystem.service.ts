@@ -411,11 +411,9 @@ export class FileSystemService implements ISyncService {
         );
       }
       if (!(await FileService.WriteFile(target, content))) {
-        Commons.LogException(
-          null,
-          localize("cmd.downloadSettings.error.writeFile", target),
-          true
-        );
+        // Do not record the folder as imported when even one restore fails.
+        // The next regular import must be able to retry the missing file.
+        throw new Error(localize("cmd.downloadSettings.error.writeFile", target));
       }
     }
 
@@ -451,15 +449,23 @@ export class FileSystemService implements ISyncService {
       );
     }
 
+    // settings.json was replaced, so put this machine's sync options back.
+    // If saving those local options fails, do not persist a "lastDownload"
+    // receipt that would suppress the next attempt.
+    const settingsSaved = await this.state.commons.SaveSettings(syncSetting);
+    if (!settingsSaved) {
+      vscode.window.showErrorMessage(
+        localize("cmd.downloadSettings.error.unableSave")
+      );
+      return;
+    }
     if (metadata) {
       fileSystemSettings.lastDownload = new Date(metadata.lastUpload);
     }
-    // settings.json was replaced, so put this machine's sync options back.
-    const settingsSaved = await this.state.commons.SaveSettings(syncSetting);
     const customSettingsSaved = await this.state.commons.SetCustomSettings(
       customSettings
     );
-    if (!settingsSaved || !customSettingsSaved) {
+    if (!customSettingsSaved) {
       vscode.window.showErrorMessage(
         localize("cmd.downloadSettings.error.unableSave")
       );
