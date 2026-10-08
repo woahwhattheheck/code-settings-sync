@@ -1,5 +1,6 @@
 "use strict";
 
+import * as fs from "fs";
 import * as path from "path";
 import { File } from "./file.service";
 import { ExtensionInformation } from "./plugin.service";
@@ -56,8 +57,6 @@ export class DownloadChangeService {
   }
 
   public static ResolveFilePath(userFolder: string, fileName: string): string {
-    // Gist filenames can encode nested user files with | or slash separators.
-    // Never allow a remote filename to escape the VS Code user settings root.
     if (
       !fileName ||
       path.posix.isAbsolute(fileName) ||
@@ -67,15 +66,33 @@ export class DownloadChangeService {
     ) {
       throw new Error("Unsafe remote settings filename.");
     }
+
     const parts = fileName.split(/[|/\\]+/);
     if (parts.some(part => !part || part === "." || part === "..")) {
       throw new Error("Unsafe remote settings filename.");
     }
+
     const base = path.resolve(userFolder);
     const target = path.resolve(base, ...parts);
     if (target === base || !target.startsWith(base + path.sep)) {
       throw new Error("Unsafe remote settings filename.");
     }
+
+    let current = base;
+    for (const part of parts) {
+      current = path.join(current, part);
+      try {
+        if (fs.lstatSync(current).isSymbolicLink()) {
+          throw new Error("Unsafe remote settings filename.");
+        }
+      } catch (err) {
+        if (err && (err as any).code === "ENOENT") {
+          break;
+        }
+        throw err;
+      }
+    }
+
     return target;
   }
 
