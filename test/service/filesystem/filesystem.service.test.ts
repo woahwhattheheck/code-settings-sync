@@ -219,6 +219,34 @@ describe("FileSystemService", function() {
       .to.be.false;
   });
 
+  it("ignores custom files absent from an authoritative export manifest", async () => {
+    const sourceUser = path.join(root, "custom-source", "User");
+    await fs.outputFile(path.join(sourceUser, "settings.json"), '{ "verified": 1 }');
+    const source = Machine(sourceUser, OsType.Linux, () => undefined);
+    UseFolder(source.custom, source.ext);
+    await new FileSystemService(source.state).Export();
+
+    const metadata = JSON.parse(
+      await fs.readFile(path.join(folder, "cloudSettings"), "utf8")
+    );
+    expect(metadata.files).not.to.include("|customized_sync|.eslintrc");
+    // A stale/injected file is not in the completed export's manifest and
+    // must not be restored to an arbitrary configured path outside USER_FOLDER.
+    await fs.outputFile(path.join(folder, "customized_sync", ".eslintrc"), "injected");
+    const target = path.join(root, "custom-destination", "home", ".eslintrc");
+    const destinationUser = path.join(root, "custom-destination", "User");
+    const destination = Machine(destinationUser, OsType.Linux, custom => {
+      custom.customFiles = { ".eslintrc": target };
+    });
+    UseFolder(destination.custom, destination.ext);
+    await new FileSystemService(destination.state).Import();
+
+    expect(recorded.errors).to.deep.equal([]);
+    expect(await fs.pathExists(target)).to.be.false;
+    expect(await fs.readFile(path.join(destinationUser, "settings.json"), "utf8"))
+      .to.equal('{ "verified": 1 }');
+  });
+
   it("fails an incomplete export before writing files or recording lastDownload", async () => {
     const sourceUser = path.join(root, "missing-source", "User");
     await fs.outputFile(path.join(sourceUser, "settings.json"), '{ "remote": 1 }');
