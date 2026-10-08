@@ -198,6 +198,47 @@ describe("FileSystemService", function() {
     ).to.equal('["mac"]');
   });
 
+  it("restores only manifest-declared files from a shared sync folder", async () => {
+    const sourceUser = path.join(root, "manifest-source", "User");
+    await fs.outputFile(path.join(sourceUser, "settings.json"), '{ "verified": 1 }');
+    const source = Machine(sourceUser, OsType.Linux, () => undefined);
+    UseFolder(source.custom, source.ext);
+    await new FileSystemService(source.state).Export();
+
+    // Unrelated or injected files in the shared folder must not be imported.
+    await fs.outputFile(path.join(folder, "snippets", "unlisted.json"), '{ "injected": true }');
+    const destinationUser = path.join(root, "manifest-destination", "User");
+    const destination = Machine(destinationUser, OsType.Linux, () => undefined);
+    UseFolder(destination.custom, destination.ext);
+    await new FileSystemService(destination.state).Import();
+
+    expect(recorded.errors).to.deep.equal([]);
+    expect(await fs.readFile(path.join(destinationUser, "settings.json"), "utf8"))
+      .to.equal('{ "verified": 1 }');
+    expect(await fs.pathExists(path.join(destinationUser, "snippets", "unlisted.json")))
+      .to.be.false;
+  });
+
+  it("fails an incomplete export before writing files or recording lastDownload", async () => {
+    const sourceUser = path.join(root, "missing-source", "User");
+    await fs.outputFile(path.join(sourceUser, "settings.json"), '{ "remote": 1 }');
+    await fs.outputFile(path.join(sourceUser, "snippets", "required.json"), '{}');
+    const source = Machine(sourceUser, OsType.Linux, () => undefined);
+    UseFolder(source.custom, source.ext);
+    await new FileSystemService(source.state).Export();
+
+    await fs.remove(path.join(folder, "snippets", "required.json"));
+    const destinationUser = path.join(root, "missing-destination", "User");
+    const destination = Machine(destinationUser, OsType.Linux, () => undefined);
+    UseFolder(destination.custom, destination.ext);
+    await new FileSystemService(destination.state).Import();
+
+    expect(recorded.errors).to.have.length(1);
+    expect(recorded.errors[0]).to.match(/incomplete/i);
+    expect(await fs.pathExists(path.join(destinationUser, "settings.json"))).to.be.false;
+    expect(destination.custom.fileSystemSettings.lastDownload).to.be.null;
+  });
+
   it("skips an import that is already applied unless forceDownload is on", async () => {
     const userA = path.join(root, "a", "User");
     await fs.outputFile(path.join(userA, "settings.json"), '{ "a": 1 }');
