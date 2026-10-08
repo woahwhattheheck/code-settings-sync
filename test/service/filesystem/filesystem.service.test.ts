@@ -198,6 +198,49 @@ describe("FileSystemService", function() {
     ).to.equal('["mac"]');
   });
 
+  it("round-trips intentionally empty ordinary and custom files", async () => {
+    const sourceUser = path.join(root, "empty-source", "User");
+    const sourceCustom = path.join(root, "empty-source", ".eslintrc");
+    await fs.outputFile(path.join(sourceUser, "settings.json"), "{}");
+    await fs.outputFile(path.join(sourceUser, "snippets", "empty.json"), "");
+    await fs.outputFile(sourceCustom, "");
+    const source = Machine(sourceUser, OsType.Linux, custom => {
+      custom.customFiles = { ".eslintrc": sourceCustom };
+    });
+    UseFolder(source.custom, source.ext);
+
+    await new FileSystemService(source.state).Export();
+
+    expect(await fs.readFile(path.join(folder, "snippets", "empty.json"), "utf8"))
+      .to.equal("");
+    expect(
+      await fs.readFile(path.join(folder, "customized_sync", ".eslintrc"), "utf8")
+    ).to.equal("");
+    const metadata = JSON.parse(
+      await fs.readFile(path.join(folder, "cloudSettings"), "utf8")
+    );
+    expect(metadata.files).to.include("snippets|empty.json");
+    expect(metadata.files).to.include("|customized_sync|.eslintrc");
+
+    const destinationUser = path.join(root, "empty-destination", "User");
+    const destinationCustom = path.join(root, "empty-destination", ".eslintrc");
+    await fs.outputFile(path.join(destinationUser, "snippets", "empty.json"), "stale");
+    await fs.outputFile(destinationCustom, "stale");
+    const destination = Machine(destinationUser, OsType.Linux, custom => {
+      custom.customFiles = { ".eslintrc": destinationCustom };
+    });
+    UseFolder(destination.custom, destination.ext);
+
+    await new FileSystemService(destination.state).Import();
+
+    expect(recorded.errors).to.deep.equal([]);
+    expect(
+      await fs.readFile(path.join(destinationUser, "snippets", "empty.json"), "utf8")
+    ).to.equal("");
+    expect(await fs.readFile(destinationCustom, "utf8")).to.equal("");
+    expect(destination.custom.fileSystemSettings.lastDownload).not.to.be.null;
+  });
+
   it("restores only manifest-declared files from a shared sync folder", async () => {
     const sourceUser = path.join(root, "manifest-source", "User");
     await fs.outputFile(path.join(sourceUser, "settings.json"), '{ "verified": 1 }');

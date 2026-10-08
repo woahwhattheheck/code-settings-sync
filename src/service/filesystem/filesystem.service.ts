@@ -221,7 +221,6 @@ export class FileSystemService implements ISyncService {
         path.relative(env.USER_FOLDER, file.filePath)
       );
       if (
-        file.content === "" ||
         relativeName === KEYBINDINGS_MAC ||
         relativeName === env.FILE_EXTENSION_NAME
       ) {
@@ -376,7 +375,7 @@ export class FileSystemService implements ISyncService {
         isMac,
         customSettings.universalKeybindings
       );
-      if (name === null || file.content === "") {
+      if (name === null) {
         continue;
       }
       updatedFiles.push(
@@ -397,7 +396,7 @@ export class FileSystemService implements ISyncService {
         continue;
       }
       const content = await store.ReadFile(name);
-      if (content) {
+      if (content !== null) {
         updatedFiles.push(
           new File(
             key,
