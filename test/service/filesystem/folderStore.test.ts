@@ -355,6 +355,65 @@ describe("FolderStore", () => {
       expect(await fs.pathExists(lock)).to.equal(false);
     });
 
+    it("renews a live export lease so another writer cannot treat it as stale", async () => {
+      await fs.ensureDir(folder);
+      const lock = path.join(folder, LOCK_FILE);
+      const store: any = new FolderStore(folder);
+      const lease = await store.Lock(await fs.realpath(folder));
+      try {
+        const stale = new Date(Date.now() - 10 * 60 * 1000);
+        await fs.utimes(lock, stale, stale);
+        await lease.renew();
+        const refreshed = await fs.stat(lock);
+        expect(Date.now() - refreshed.mtimeMs).to.be.lessThan(5000);
+
+        let error: Error = null;
+        try {
+          await new FolderStore(folder).Write(
+            [{ name: "settings.json", content: "{}" }],
+            { lastUpload: new Date() }
+          );
+        } catch (err) {
+          error = err;
+        }
+        expect(error).to.not.equal(null);
+        expect(error.message).to.match(/in progress/);
+      } finally {
+        await lease.release();
+      }
+      expect(await fs.pathExists(lock)).to.equal(false);
+    });
+
+    it("aborts after takeover and does not delete the successor export lock", async () => {
+      const store: any = new FolderStore(folder);
+      const originalWrite = store.WriteAtomic.bind(store);
+      const lock = path.join(folder, LOCK_FILE);
+      const successor = "successor-export-owner";
+      let tookOver = false;
+      store.WriteAtomic = async (root: string, relative: string, content: string) => {
+        if (!tookOver) {
+          tookOver = true;
+          await fs.remove(lock);
+          await fs.outputFile(lock, successor);
+        }
+        await originalWrite(root, relative, content);
+      };
+
+      let error: Error = null;
+      try {
+        await store.Write(
+          [{ name: "settings.json", content: "{}" }],
+          { lastUpload: new Date() }
+        );
+      } catch (err) {
+        error = err;
+      }
+      expect(error).to.not.equal(null);
+      expect(error.message).to.match(/lock ownership was lost/);
+      expect(await fs.readFile(lock, "utf8")).to.equal(successor);
+      expect(await fs.pathExists(path.join(folder, METADATA_FILE))).to.equal(false);
+    });
+
     it("refuses to replace an export that arrived after it was read", async () => {
       const store = new FolderStore(folder);
       await store.Write([{ name: "settings.json", content: "1" }], {
