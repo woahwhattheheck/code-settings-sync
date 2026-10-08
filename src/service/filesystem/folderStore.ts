@@ -461,15 +461,33 @@ export class FolderStore {
         `Sync: Another machine exported to ${this.folder} during this export. Run the export again.`
       );
     }
+    // Reject the *whole* proposed export before publishing a single file.
+    // A late duplicate/invalid entry must not leave partial new settings
+    // next to the previous, still-authoritative cloudSettings manifest.
     const names = new Set<string>();
+    const destinations = new Set<string>();
+    const prepared: Array<{ relative: string; content: string }> = [];
     for (const file of files) {
-      await assertOwned();
+      if (!file || typeof file.name !== "string" ||
+          typeof file.content !== "string") {
+        throw new Error("Sync: Invalid settings export entry.");
+      }
       const relative = ToRelativePath(file.name);
-      if (file.name === METADATA_FILE || names.has(file.name)) {
-        throw new Error(`Sync: Duplicate settings file name "${file.name}".`);
+      // Different manifest names may normalize to one destination, e.g.
+      // customized_sync|foo vs |customized_sync|foo. Case and Unicode
+      // folding also prevent cross-OS folder collisions.
+      const destination = relative.split(path.sep).join("/").normalize("NFC").toLowerCase();
+      if (file.name === METADATA_FILE || names.has(file.name) ||
+          destinations.has(destination)) {
+        throw new Error(`Sync: Duplicate or reserved settings file name "${file.name}".`);
       }
       names.add(file.name);
-      await this.WriteAtomic(root, relative, file.content, assertOwned);
+      destinations.add(destination);
+      prepared.push({ relative, content: file.content });
+    }
+    for (const file of prepared) {
+      await assertOwned();
+      await this.WriteAtomic(root, file.relative, file.content, assertOwned);
       await assertOwned();
     }
     const stale =
