@@ -256,9 +256,17 @@ export class FileSystemService implements ISyncService {
       content: file.content
     }));
     const metadata = await store.ReadMetadata();
+    const managedKeybinding = ExportName(
+      KEYBINDINGS,
+      isMac,
+      customSettings.universalKeybindings
+    );
     const fileSystemSettings = customSettings.fileSystemSettings;
     if (!syncSetting.forceUpload) {
-      if (metadata && !(await store.HasChanges(folderFiles, metadata))) {
+      if (
+        metadata &&
+        !(await store.HasChanges(folderFiles, metadata, managedKeybinding))
+      ) {
         vscode.window.setStatusBarMessage(
           localize("cmd.updateSettings.info.gotLatestVersion"),
           5000
@@ -291,7 +299,8 @@ export class FileSystemService implements ISyncService {
     await store.Write(
       folderFiles,
       { lastUpload: now, extensionVersion: "v" + env.getVersion() },
-      metadata
+      metadata,
+      managedKeybinding
     );
     fileSystemSettings.lastUpload = now;
     fileSystemSettings.lastDownload = now;

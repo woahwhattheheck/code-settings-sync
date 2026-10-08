@@ -33,6 +33,16 @@ export const KEYBINDINGS = "keybindings.json";
 export const KEYBINDINGS_MAC = "keybindingsMac.json";
 export const LOCK_FILE = ".settings-sync.lock";
 const TEMP_SUFFIX = ".sync-tmp";
+
+function IsForeignKeybinding(
+  name: string,
+  managedKeybinding?: string
+): boolean {
+  return (
+    (name === KEYBINDINGS || name === KEYBINDINGS_MAC) &&
+    name !== managedKeybinding
+  );
+}
 /** A lock older than this was left behind by an export that crashed. */
 const STALE_LOCK_MS = 2 * 60 * 1000;
 
@@ -291,7 +301,8 @@ export class FolderStore {
    */
   public async HasChanges(
     files: FolderFile[],
-    previous: FolderMetadata = null
+    previous: FolderMetadata = null,
+    managedKeybinding?: string
   ): Promise<boolean> {
     const names = new Set(files.map(file => file.name));
     const removed =
@@ -301,7 +312,7 @@ export class FolderStore {
         name =>
           typeof name === "string" &&
           !names.has(name) &&
-          !name.startsWith("keybindings")
+          !IsForeignKeybinding(name, managedKeybinding)
       );
     if (removed) {
       return true;
@@ -317,8 +328,8 @@ export class FolderStore {
   /**
    * Writes every file (each one atomically), removes files that the previous
    * export wrote but this one did not, then writes the metadata file last.
-   * Keybinding files are kept so a shared folder keeps the other OS's bindings,
-   * matching how the gist upload treats them.
+   * The other OS's keybinding file is kept, while a deleted keybinding managed
+   * by this exporter is removed, matching how the gist upload treats them.
    *
    * The work happens under a lock file so two machines exporting to a shared
    * folder cannot interleave. When `expected` (the metadata the caller compared
@@ -327,14 +338,22 @@ export class FolderStore {
   public async Write(
     files: FolderFile[],
     metadata: FolderMetadata,
-    expected?: FolderMetadata | null
+    expected?: FolderMetadata | null,
+    managedKeybinding?: string
   ): Promise<void> {
     await fs.ensureDir(this.folder);
     const root = await fs.realpath(this.folder);
     const lease = await this.Lock(root);
     try {
       await lease.assertOwned();
-      await this.WriteLocked(root, files, metadata, expected, lease.assertOwned);
+      await this.WriteLocked(
+        root,
+        files,
+        metadata,
+        expected,
+        lease.assertOwned,
+        managedKeybinding
+      );
     } finally {
       await lease.release();
     }
@@ -443,7 +462,8 @@ export class FolderStore {
     files: FolderFile[],
     metadata: FolderMetadata,
     expected: FolderMetadata | null | undefined,
-    assertOwned: () => Promise<void>
+    assertOwned: () => Promise<void>,
+    managedKeybinding?: string
   ): Promise<void> {
     await assertOwned();
     let previous: FolderMetadata = null;
@@ -497,14 +517,11 @@ export class FolderStore {
       if (typeof name !== "string" || names.has(name)) {
         continue;
       }
-      if (name.startsWith("keybindings")) {
+      if (IsForeignKeybinding(name, managedKeybinding)) {
         // Import uses this manifest as its authority. Retaining the other
         // OS's file on disk also requires retaining its manifest entry.
         // Do not advertise a missing file: imports reject incomplete exports.
-        if (
-          (name === KEYBINDINGS || name === KEYBINDINGS_MAC) &&
-          (await this.ReadFile(name)) !== null
-        ) {
+        if ((await this.ReadFile(name)) !== null) {
           names.add(name);
         }
         continue;

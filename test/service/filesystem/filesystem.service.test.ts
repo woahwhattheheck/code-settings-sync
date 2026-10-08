@@ -420,6 +420,44 @@ describe("FileSystemService", function() {
     ).to.equal('{ "b": 1 }');
   });
 
+  it("removes deleted local keybindings while retaining the other OS copy", async () => {
+    const macUser = path.join(root, "mac-keybindings", "User");
+    await fs.outputFile(path.join(macUser, "keybindings.json"), '["mac"]');
+    const mac = Machine(macUser, OsType.Mac, () => undefined);
+    UseFolder(mac.custom, mac.ext);
+    await new FileSystemService(mac.state).Export();
+
+    const linuxUser = path.join(root, "linux-keybindings", "User");
+    await fs.outputFile(path.join(linuxUser, "keybindings.json"), '["linux"]');
+    const linux = Machine(linuxUser, OsType.Linux, (_custom, ext) => {
+      // The first export intentionally combines this machine with the existing
+      // macOS export without asking the newer-export confirmation question.
+      ext.forceUpload = true;
+    });
+    UseFolder(linux.custom, linux.ext);
+    await new FileSystemService(linux.state).Export();
+    linux.ext.forceUpload = false;
+
+    expect(
+      await fs.pathExists(path.join(folder, "keybindings.json"))
+    ).to.be.true;
+    expect(await fs.pathExists(path.join(folder, "keybindingsMac.json"))).to.be
+      .true;
+
+    await fs.remove(path.join(linuxUser, "keybindings.json"));
+    await new FileSystemService(linux.state).Export();
+
+    expect(await fs.pathExists(path.join(folder, "keybindings.json"))).to.be
+      .false;
+    expect(await fs.readFile(path.join(folder, "keybindingsMac.json"), "utf8"))
+      .to.equal('["mac"]');
+    const metadata = JSON.parse(
+      await fs.readFile(path.join(folder, "cloudSettings"), "utf8")
+    );
+    expect(metadata.files).not.to.include("keybindings.json");
+    expect(metadata.files).to.include("keybindingsMac.json");
+  });
+
   it("leaves an unchanged export alone and removes deleted snippets", async () => {
     const user = path.join(root, "a", "User");
     await fs.outputFile(path.join(user, "settings.json"), "{}");
