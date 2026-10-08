@@ -1,4 +1,5 @@
 import { expect } from "chai";
+import * as path from "path";
 
 import {
   DownloadChangeService,
@@ -19,6 +20,39 @@ function extension(name: string): ExtensionInformation {
 }
 
 describe("DownloadChangeService", () => {
+  it("keeps relative Gist file paths inside the user settings directory", () => {
+    const base = path.resolve("safe-user-settings");
+    expect(DownloadChangeService.ResolveFilePath(base, "settings.json")).to.equal(
+      path.join(base, "settings.json")
+    );
+    expect(DownloadChangeService.ResolveFilePath(base, "snippets|javascript.json")).to.equal(
+      path.join(base, "snippets", "javascript.json")
+    );
+    expect(DownloadChangeService.ResolveFilePath(base, "snippets//typescript.json")).to.equal(
+      path.join(base, "snippets", "typescript.json")
+    );
+  });
+
+  it("refuses remote paths that escape the VS Code user directory", () => {
+    const base = path.resolve("safe-user-settings");
+    const unsafe = [
+      "..|..|private.json",
+      "../private.json",
+      "snippets|..|private.json",
+      "snippets\\..\\private.json",
+      "/tmp/private.json",
+      "C:\\Users\\Admin\\private.json",
+      "C:|Users|Admin|private.json",
+      "\\\\server\\share\\private.json",
+      ".",
+      ""
+    ];
+    for (const name of unsafe) {
+      expect(() => DownloadChangeService.ResolveFilePath(base, name), name)
+        .to.throw("Unsafe remote settings filename.");
+    }
+  });
+
   it("previews extension replacements by publisher-qualified ID", () => {
     const local = extension("shared-name");
     local.publisher = "publisher-one";
