@@ -59,6 +59,30 @@ describe("HasDirtyDocument", () => {
     }
   });
 
+  it("matches a missing file through an existing symlinked parent", () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "editor-match-"));
+    const realDirectory = path.join(directory, "real");
+    const linkedDirectory = path.join(directory, "linked");
+    fs.mkdirpSync(realDirectory);
+    fs.symlinkSync(
+      realDirectory,
+      linkedDirectory,
+      process.platform === "win32" ? "junction" : "dir"
+    );
+    const realTarget = path.join(realDirectory, "new-settings.json");
+
+    try {
+      expect(
+        HasDirtyDocument(
+          [{ fileName: realTarget, isDirty: true }],
+          path.join(linkedDirectory, "new-settings.json")
+        )
+      ).to.equal(true);
+    } finally {
+      fs.removeSync(directory);
+    }
+  });
+
   it("returns false for an empty list of open documents", () => {
     expect(HasDirtyDocument([], target)).to.equal(false);
   });

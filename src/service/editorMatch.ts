@@ -15,8 +15,18 @@ export function normalizeFilePath(filePath: string): string {
     // Sync reaches the same file through a symlinked settings path.
     canonical = fs.realpathSync(resolved);
   } catch {
-    // Download targets may not exist yet; lexical normalization is sufficient
-    // until there is an on-disk identity to resolve.
+    // The leaf may not exist yet even though its parent does. Resolve that
+    // parent so a new file reached through a symlink still has the same
+    // identity as an unsaved document opened through the real parent.
+    try {
+      canonical = path.join(
+        fs.realpathSync(path.dirname(resolved)),
+        path.basename(resolved)
+      );
+    } catch {
+      // Multiple missing ancestors have no on-disk identity yet; retain the
+      // lexical normalization until their directory tree exists.
+    }
   }
   return process.platform === "win32" ? canonical.toLowerCase() : canonical;
 }
