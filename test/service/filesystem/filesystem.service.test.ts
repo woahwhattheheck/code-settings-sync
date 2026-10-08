@@ -452,6 +452,25 @@ describe("FileSystemService", function() {
     expect(a.summaries).to.have.length(0);
   });
 
+  it("keeps custom-file-only legacy imports valid without cloudSettings", async () => {
+    const user = path.join(root, "legacy-custom", "User");
+    const destination = path.join(root, "legacy-custom", ".eslintrc");
+    await fs.outputFile(
+      path.join(folder, "customized_sync", ".eslintrc"),
+      '{ "legacy": true }'
+    );
+    const a = Machine(user, OsType.Linux, custom => {
+      custom.customFiles = { ".eslintrc": destination };
+    });
+    UseFolder(a.custom, a.ext);
+
+    await new FileSystemService(a.state).Import();
+
+    expect(recorded.errors).to.deep.equal([]);
+    expect(await fs.readFile(destination, "utf8")).to.equal('{ "legacy": true }');
+    expect(a.custom.fileSystemSettings.lastDownload).to.equal(null);
+  });
+
   it("reports a folder without exported settings", async () => {
     const user = path.join(root, "a", "User");
     const a = Machine(user, OsType.Linux, () => undefined);
