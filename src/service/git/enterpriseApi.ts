@@ -206,7 +206,7 @@ export async function putSettingsFile(
     options,
     fileTarget,
     content,
-    existing ? existing.sha : null
+    existing
   );
 }
 
@@ -608,6 +608,8 @@ interface FileTarget {
 
 interface ExistingSettingsFile {
   sha: string;
+  content: string;
+  lastCommitId: string | null;
 }
 
 function validateTarget(
@@ -750,7 +752,14 @@ async function readSettingsFile(
   if (!file.sha) {
     throw new Error("The provider returned an unexpected file id.");
   }
-  return { sha: file.sha };
+  const lastCommitId =
+    validated.provider === "gitlab"
+      ? requiredSha(
+          parseObject(response.body).last_commit_id,
+          "The provider did not return a file last_commit_id."
+        )
+      : null;
+  return { sha: file.sha, content: file.content, lastCommitId };
 }
 
 async function ensureBranch(
@@ -849,7 +858,7 @@ async function writeSettingsFile(
   options: EnterpriseCallOptions | undefined,
   target: FileTarget,
   content: string,
-  sha: string | null
+  existing: ExistingSettingsFile | null
 ): Promise<EnterpriseSettingsFile> {
   if (validated.provider === "github") {
     return putGithubSettingsFile(
@@ -857,21 +866,28 @@ async function writeSettingsFile(
       options,
       target,
       content,
-      sha,
-      false
+      existing ? existing.sha : null,
+      false,
+      existing ? existing.content : null
     );
+  }
+  const payload: { [key: string]: string } = {
+    branch: target.branch,
+    content,
+    commit_message: SETTINGS_COMMIT_MESSAGE,
+    encoding: "text"
+  };
+  // GitLab's PUT accepts this file-specific optimistic-concurrency key.
+  // Never clobber a newer remote edit between the GET and the upload.
+  if (existing && existing.lastCommitId) {
+    payload.last_commit_id = existing.lastCommitId;
   }
   const response = await requestApi(
     validated,
     options,
     settingsFileUrl(validated, target, false),
-    sha ? "PUT" : "POST",
-    JSON.stringify({
-      branch: target.branch,
-      content,
-      commit_message: SETTINGS_COMMIT_MESSAGE,
-      encoding: "text"
-    })
+    existing ? "PUT" : "POST",
+    JSON.stringify(payload)
   );
   if (response.statusCode !== 200 && response.statusCode !== 201) {
     throw new Error(httpFailure(response.statusCode));
@@ -891,7 +907,8 @@ async function putGithubSettingsFile(
   target: FileTarget,
   content: string,
   sha: string | null,
-  retried: boolean
+  retried: boolean,
+  originalContent: string | null
 ): Promise<EnterpriseSettingsFile> {
   const payload: { [key: string]: string } = {
     message: SETTINGS_COMMIT_MESSAGE,
@@ -910,8 +927,12 @@ async function putGithubSettingsFile(
   );
   if (response.statusCode === 409 && !retried) {
     const current = await readSettingsFile(validated, options, target);
-    if (!current) {
-      throw new Error(httpFailure(409));
+    if (current && current.content === content) {
+      // Another writer already stored these exact bytes; no second write.
+      return { content, branch: target.branch, sha: current.sha };
+    }
+    if (!current || originalContent === null || current.content !== originalContent) {
+      throw new Error("Remote settings changed during upload; refresh before overwriting.");
     }
     return putGithubSettingsFile(
       validated,
@@ -919,7 +940,8 @@ async function putGithubSettingsFile(
       target,
       content,
       current.sha,
-      true
+      true,
+      originalContent
     );
   }
   if (response.statusCode !== 200 && response.statusCode !== 201) {
