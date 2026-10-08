@@ -1,6 +1,7 @@
 import { expect } from "chai";
 import { RepositorySyncConfig } from "../../../src/models/repositorySyncConfig.model";
 import { repositorySettingsFromMessage } from "../../../src/service/git/repositorySettings";
+import { GitRepositorySyncService } from "../../../src/service/git/repositorySync.service";
 
 function settings(): RepositorySyncConfig {
   return Object.assign(new RepositorySyncConfig(), {
@@ -215,5 +216,44 @@ describe("repository settings messages", () => {
         );
       }
     );
+  });
+
+  it("enforces the settings remote allowlist on loaded runtime configuration", async () => {
+    const rejected = [
+      "ext::unapproved-helper",
+      "ftp://git.example/settings.git",
+      "file:///tmp/settings.git",
+      "-unsafe-remote",
+      "https://user:secret@git.example/repo",
+    ];
+    for (const remoteUrl of rejected) {
+      const state: any = {
+        commons: {
+          GetCustomSettings: async () => ({
+            repositorySync: { mode: "repository", remoteUrl, branch: "office" },
+          }),
+        },
+      };
+      expect(await new GitRepositorySyncService(state).IsConfigured()).to.equal(false);
+    }
+  });
+
+  it("retains HTTPS, SSH and local Git remotes at the runtime boundary", async () => {
+    const allowed = [
+      "https://git.example/owner/settings.git",
+      "ssh://git@git.example/owner/settings.git",
+      "git@git.example:owner/settings.git",
+      "../settings.git",
+    ];
+    for (const remoteUrl of allowed) {
+      const state: any = {
+        commons: {
+          GetCustomSettings: async () => ({
+            repositorySync: { mode: "repository", remoteUrl, branch: "office" },
+          }),
+        },
+      };
+      expect(await new GitRepositorySyncService(state).IsConfigured()).to.equal(true);
+    }
   });
 });

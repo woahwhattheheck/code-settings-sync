@@ -105,7 +105,7 @@ function validateBranch(raw: string, branch: string): void {
   }
 }
 
-function validateRemote(raw: string, remote: string): void {
+export function validateRemote(raw: string, remote: string): void {
   const message =
     "Enter an HTTPS, SSH or local Git repository remote without embedded credentials.";
   if (!remote || /[\x00-\x1f\x7f]/.test(raw) || remote.charAt(0) === "-") {

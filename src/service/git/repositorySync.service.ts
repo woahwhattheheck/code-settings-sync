@@ -1,9 +1,9 @@
 import { execFile } from "child_process";
 import * as fs from "fs-extra";
 import * as path from "path";
-import { URL } from "url";
 import * as vscode from "vscode";
 import { CustomConfig } from "../../models/customConfig.model";
+import { validateRemote } from "./repositorySettings";
 import { ISyncService } from "../../models/ISyncService.model";
 import { IExtensionState } from "../../models/state.model";
 
@@ -290,23 +290,13 @@ export class GitRepositorySyncService implements ISyncService {
   }
 
   private remote(value: string): string {
-    const remote = String(value || "").trim();
-    if (!remote || /[\0\r\n]/.test(remote)) {
-      throw new Error("Configure a Git repository remote URL before syncing.");
-    }
-    if (/^(?:http|git):\/\//i.test(remote)) {
-      throw new Error(
-        "Use HTTPS, SSH, or a local repository path for repository sync."
-      );
-    }
-    if (/^https:\/\//i.test(remote) || /^ssh:\/\//i.test(remote)) {
-      const parsed = new URL(remote);
-      if (parsed.password || (parsed.protocol === "https:" && parsed.username)) {
-        throw new Error(
-          "Do not embed repository credentials in the remote URL; use Git credential configuration or SSH."
-        );
-      }
-    }
+    const raw = String(value || "");
+    const remote = raw.trim();
+    // Validate again at the actual Git I/O boundary. Settings may be loaded
+    // from disk or legacy configuration without visiting the settings UI.
+    // Use the same allowlist as the UI so Git's executable ext:: remote helper
+    // and other unapproved URL schemes never reach fetch/push.
+    validateRemote(raw, remote);
     return remote;
   }
 
