@@ -426,6 +426,32 @@ describe("FileSystemService", function() {
     expect(await fs.pathExists(path.join(user, "backup"))).to.be.false;
   });
 
+  it("rejects a metadata-only legacy export before recording or trusting lastDownload", async () => {
+    const user = path.join(root, "a", "User");
+    const a = Machine(user, OsType.Linux, () => undefined);
+    UseFolder(a.custom, a.ext);
+    const exportedAt = "2026-10-08T06:00:00.000Z";
+    await fs.outputFile(
+      path.join(folder, "cloudSettings"),
+      JSON.stringify({ lastUpload: exportedAt, extensionVersion: "v3.4.4" })
+    );
+
+    // Old legacy metadata was enough to mark an empty import complete.
+    await new FileSystemService(a.state).Import();
+    expect(recorded.errors).to.have.length(1);
+    expect(recorded.errors[0]).to.match(/No exported settings/);
+    expect(a.custom.fileSystemSettings.lastDownload).to.equal(null);
+
+    // Also refuse a previous (incorrect) empty-import receipt: do not take
+    // the timestamp-only IsUpToDate short-circuit before payload validation.
+    ResetStub();
+    a.custom.fileSystemSettings.lastDownload = new Date(exportedAt);
+    await new FileSystemService(a.state).Import();
+    expect(recorded.errors).to.have.length(1);
+    expect(recorded.errors[0]).to.match(/No exported settings/);
+    expect(a.summaries).to.have.length(0);
+  });
+
   it("reports a folder without exported settings", async () => {
     const user = path.join(root, "a", "User");
     const a = Machine(user, OsType.Linux, () => undefined);
