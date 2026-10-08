@@ -83,6 +83,32 @@ describe("HasDirtyDocument", () => {
     }
   });
 
+  it("matches a dirty document at a dangling symlink target", () => {
+    // File symlink creation can require elevated Windows privileges. The bug
+    // reported by #396 is reproducible on POSIX, including the reporter's Linux.
+    if (process.platform === "win32") {
+      return;
+    }
+
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "editor-match-"));
+    const realDirectory = path.join(directory, "real");
+    const realTarget = path.join(realDirectory, "settings.json");
+    const linkedTarget = path.join(directory, "settings-link.json");
+    fs.mkdirpSync(realDirectory);
+    fs.symlinkSync(realTarget, linkedTarget);
+
+    try {
+      expect(
+        HasDirtyDocument(
+          [{ fileName: realTarget, isDirty: true }],
+          linkedTarget
+        )
+      ).to.equal(true);
+    } finally {
+      fs.removeSync(directory);
+    }
+  });
+
   it("returns false for an empty list of open documents", () => {
     expect(HasDirtyDocument([], target)).to.equal(false);
   });
