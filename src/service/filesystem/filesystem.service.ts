@@ -368,21 +368,6 @@ export class FileSystemService implements ISyncService {
       );
     }
     const fileSystemSettings = customSettings.fileSystemSettings;
-    if (
-      !syncSetting.forceDownload &&
-      IsUpToDate(
-        metadata,
-        fileSystemSettings.lastDownload,
-        fileSystemSettings.lastUpload
-      )
-    ) {
-      vscode.window.setStatusBarMessage("").dispose();
-      vscode.window.setStatusBarMessage(
-        localize("cmd.downloadSettings.info.gotLatestVersion"),
-        5000
-      );
-      return;
-    }
 
     const updatedFiles: File[] = [];
     let extensions: string = null;
@@ -427,6 +412,33 @@ export class FileSystemService implements ISyncService {
           )
         );
       }
+    }
+
+    // A legacy cloudSettings timestamp is not proof that any settings were
+    // exported. Refuse a metadata-only folder BEFORE the up-to-date shortcut,
+    // or recording lastDownload can prevent the next real import from running.
+    // Custom-only legacy folders are valid if a configured custom file was
+    // actually collected into updatedFiles above.
+    if (updatedFiles.length === 0 && extensions === null) {
+      throw new Error(
+        localize("cmd.downloadSettings.error.emptyFolder", folder)
+      );
+    }
+
+    if (
+      !syncSetting.forceDownload &&
+      IsUpToDate(
+        metadata,
+        fileSystemSettings.lastDownload,
+        fileSystemSettings.lastUpload
+      )
+    ) {
+      vscode.window.setStatusBarMessage("").dispose();
+      vscode.window.setStatusBarMessage(
+        localize("cmd.downloadSettings.info.gotLatestVersion"),
+        5000
+      );
+      return;
     }
 
     for (const file of updatedFiles) {
