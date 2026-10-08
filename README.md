@@ -124,6 +124,8 @@ Instead of a GitHub Gist, Settings Sync can export your settings to a folder and
 
 The folder holds plain files laid out like your `User` folder: `settings.json`, `keybindings.json` (`keybindingsMac.json` when exported from macOS), `snippets/`, `extensions.json` (the extension list), `customized_sync/` for [custom sync](https://github.com/shanalikhan/code-settings-sync/wiki/Custom-Sync) files, and `cloudSettings` with the time of the last export. Sync pragmas, ignored files / folders / extensions, auto upload, auto download, force upload / download and the summary page work the same way as with a gist. No token or gist ID is needed.
 
+When `cloudSettings` includes a completed export file list, imports restore only those declared files. An unrelated file added to the shared folder is ignored; a listed file missing from the folder is treated as an incomplete export and will not mark the import as complete. Older manually copied folders without a file list can still be imported using the existing folder rules.
+
 The choice is stored in `syncLocalSettings.json`:
 
 ```json
