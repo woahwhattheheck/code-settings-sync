@@ -490,7 +490,8 @@ export class GistService implements ISyncService {
 
     keys.forEach(gistName => {
       if (res.data.files[gistName]) {
-        if (res.data.files[gistName].content) {
+        // Empty text is a valid synced file; only skip missing payloads.
+        if (typeof res.data.files[gistName].content === "string") {
           const prefix = FileService.CUSTOMIZED_SYNC_PREFIX;
           if (gistName.indexOf(prefix) > -1) {
             const fileName = gistName.split(prefix).join(""); // |customized_sync|.htmlhintrc => .htmlhintrc
@@ -542,7 +543,12 @@ export class GistService implements ISyncService {
       let writeFile = false;
       let content: string = file.content;
 
-      if (content !== "") {
+      // Empty settings/snippet files must be written, but an empty extension
+      // manifest must not be interpreted as an instruction to remove add-ons.
+      if (
+        content !== "" ||
+        file.gistName !== this.state.environment.FILE_EXTENSION_NAME
+      ) {
         if (file.gistName === this.state.environment.FILE_EXTENSION_NAME) {
           if (syncSetting.syncExtensions) {
             if (syncSetting.removeExtensions) {
