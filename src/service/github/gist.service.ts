@@ -643,14 +643,8 @@ export class GistService implements ISyncService {
             actionList.push(
               EditorService.WriteFile(filePath, content)
                 .then(written => {
-                  // Skipped dirty editors and filesystem failures are not a
-                  // successful download. Keep lastDownload retryable.
-                  if (!written) {
-                    throw new Error(
-                      "Sync: A downloaded settings file was not saved: " +
-                        filePath
-                    );
-                  }
+                  // A dirty editor or failed write is not a successful sync.
+                  return written;
                 })
                 .catch(err => {
                   Commons.LogException(
@@ -658,7 +652,7 @@ export class GistService implements ISyncService {
                     this.state.commons.ERROR_MESSAGE,
                     true
                   );
-                  throw err;
+                  return false;
                 })
             );
           }
@@ -666,7 +660,14 @@ export class GistService implements ISyncService {
       }
     }
 
-    await Promise.all(actionList);
+    const writeResults = await Promise.all(actionList);
+    // Collect every write result before throwing, so a failed early write
+    // cannot reject while later asynchronous files are still being prepared.
+    if (writeResults.some(written => written === false)) {
+      throw new Error(
+        "Sync: Some settings files were not saved. Resolve the conflict and retry the download."
+      );
+    }
     if (downloadedUploadTime) {
       customSettings.githubSettings.gistSettings.lastDownload =
         downloadedUploadTime;
