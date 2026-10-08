@@ -362,11 +362,6 @@ export class FileSystemService implements ISyncService {
       }
       declaredFiles = declared;
     }
-    if (!metadata && folderFiles.length === 0) {
-      throw new Error(
-        localize("cmd.downloadSettings.error.emptyFolder", folder)
-      );
-    }
     const fileSystemSettings = customSettings.fileSystemSettings;
 
     const updatedFiles: File[] = [];
