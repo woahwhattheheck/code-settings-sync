@@ -436,6 +436,8 @@ export class GistService implements ISyncService {
       customSettings.ignoreExtensions || new Array<string>();
     const updatedFiles: File[] = [];
     const actionList: Array<Promise<void | boolean>> = [];
+    // Commit the downloaded version only after every requested file was saved.
+    let downloadedUploadTime: Date = null;
 
     if (res.data.public === true) {
       localSettings.publicGist = true;
@@ -483,8 +485,7 @@ export class GistService implements ISyncService {
           return;
         }
       }
-      customSettings.githubSettings.gistSettings.lastDownload =
-        cloudSett.lastUpload;
+      downloadedUploadTime = cloudSett.lastUpload;
     }
 
     keys.forEach(gistName => {
@@ -641,8 +642,15 @@ export class GistService implements ISyncService {
 
             actionList.push(
               EditorService.WriteFile(filePath, content)
-                .then(() => {
-                  // TODO : add Name attribute in File and show information message here with name , when required.
+                .then(written => {
+                  // Skipped dirty editors and filesystem failures are not a
+                  // successful download. Keep lastDownload retryable.
+                  if (!written) {
+                    throw new Error(
+                      "Sync: A downloaded settings file was not saved: " +
+                        filePath
+                    );
+                  }
                 })
                 .catch(err => {
                   Commons.LogException(
@@ -650,7 +658,7 @@ export class GistService implements ISyncService {
                     this.state.commons.ERROR_MESSAGE,
                     true
                   );
-                  return;
+                  throw err;
                 })
             );
           }
@@ -659,6 +667,10 @@ export class GistService implements ISyncService {
     }
 
     await Promise.all(actionList);
+    if (downloadedUploadTime) {
+      customSettings.githubSettings.gistSettings.lastDownload =
+        downloadedUploadTime;
+    }
     const settingsUpdated = await this.state.commons.SaveSettings(syncSetting);
     const customSettingsUpdated = await this.state.commons.SetCustomSettings(
       customSettings
