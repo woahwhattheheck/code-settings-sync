@@ -125,6 +125,11 @@ export class GitRepositorySyncService implements ISyncService {
     await this.initialize(directory, branch);
     await this.writeManagedExcludes(directory, customSettings);
     await this.ensureRemote(directory, remote);
+    // Git ignore rules only prevent adding UNTRACKED files. Once a user has
+    // tracked a settings/credential file, newly ignoring it is insufficient:
+    // git add --all would still stage and publish future changes to that file.
+    // Drop ignored files from Git's INDEX, not from the local user folder.
+    await this.untrackIgnoredFiles(directory);
     await this.runner.run(directory, ["add", "--all"]);
 
     const changed = Boolean(
@@ -150,6 +155,31 @@ export class GitRepositorySyncService implements ISyncService {
       branch
     ]);
     return { changed, pushed: true };
+  }
+
+  private async untrackIgnoredFiles(directory: string): Promise<void> {
+    // NUL-delimited output protects names with whitespace, newlines and
+    // leading dashes. Existing Git ignore rules and our managed excludes
+    // both apply; the on-disk settings are never deleted.
+    const ignored = await this.runner.run(directory, [
+      "ls-files",
+      "--cached",
+      "--ignored",
+      "--exclude-standard",
+      "-z"
+    ]);
+    const paths = ignored.split("\0").filter(Boolean);
+    // Bound argv length while preserving filename boundaries and the
+    // destructive-command '--' separator. This changes only Git's index.
+    for (let i = 0; i < paths.length; i += 50) {
+      await this.runner.run(directory, [
+        "rm",
+        "--cached",
+        "--force",
+        "--",
+        ...paths.slice(i, i + 50)
+      ]);
+    }
   }
 
   private async download(
