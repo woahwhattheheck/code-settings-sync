@@ -158,7 +158,10 @@ export class GitRepositorySyncService implements ISyncService {
     branch: string,
     customSettings: CustomConfig
   ): Promise<void> {
-    await this.initialize(directory, branch);
+    // Do not use the normal (non-forced) branch checkout before fetching.
+    // Dirty tracked settings may block it, even though the user explicitly
+    // requested force-download. Fetch first and only then force checkout.
+    await this.initialize(directory, branch, false);
     await this.writeManagedExcludes(directory, customSettings);
     await this.ensureRemote(directory, remote);
     await this.runner.run(directory, ["fetch", "--prune", "origin", branch]);
@@ -174,13 +177,19 @@ export class GitRepositorySyncService implements ISyncService {
     // VS Code user files with `git clean -fd` in the entire user directory.
   }
 
-  private async initialize(directory: string, branch: string): Promise<void> {
+  private async initialize(
+    directory: string,
+    branch: string,
+    checkoutBranch = true
+  ): Promise<void> {
     await fs.ensureDir(directory);
     await this.runner.run(directory, ["check-ref-format", "--branch", branch]);
     if (!(await fs.pathExists(path.join(directory, ".git")))) {
       await this.runner.run(directory, ["init"]);
     }
-    await this.ensureBranch(directory, branch);
+    if (checkoutBranch) {
+      await this.ensureBranch(directory, branch);
+    }
   }
 
   private async ensureBranch(directory: string, branch: string): Promise<void> {
