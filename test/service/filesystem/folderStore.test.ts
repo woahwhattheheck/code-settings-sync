@@ -253,7 +253,27 @@ describe("FolderStore", () => {
         true
       );
       expect((await store.ReadMetadata()).files).to.deep.equal([
+        "keybindingsMac.json",
         "settings.json"
+      ]);
+
+      // A subsequent non-Mac export must still expose the Mac bindings to
+      // manifest-filtered imports, alongside its own OS-specific bindings.
+      await store.Write([
+        { name: "settings.json", content: "{ }" },
+        { name: "keybindings.json", content: "[]" }
+      ], { lastUpload: "2026-10-03T10:00:00.000Z" });
+      expect((await store.ReadMetadata()).files).to.deep.equal([
+        "keybindings.json", "keybindingsMac.json", "settings.json"
+      ]);
+
+      // A removed retained file must not leave a phantom manifest entry.
+      await fs.remove(path.join(folder, "keybindingsMac.json"));
+      await store.Write([{ name: "settings.json", content: "{}" }], {
+        lastUpload: "2026-10-04T10:00:00.000Z"
+      });
+      expect((await store.ReadMetadata()).files).to.deep.equal([
+        "keybindings.json", "settings.json"
       ]);
     });
 

@@ -476,11 +476,19 @@ export class FolderStore {
       previous && Array.isArray(previous.files) ? previous.files : [];
     for (const name of stale) {
       await assertOwned();
-      if (
-        typeof name !== "string" ||
-        names.has(name) ||
-        name.startsWith("keybindings")
-      ) {
+      if (typeof name !== "string" || names.has(name)) {
+        continue;
+      }
+      if (name.startsWith("keybindings")) {
+        // Import uses this manifest as its authority. Retaining the other
+        // OS's file on disk also requires retaining its manifest entry.
+        // Do not advertise a missing file: imports reject incomplete exports.
+        if (
+          (name === KEYBINDINGS || name === KEYBINDINGS_MAC) &&
+          (await this.ReadFile(name)) !== null
+        ) {
+          names.add(name);
+        }
         continue;
       }
       let target: string;
