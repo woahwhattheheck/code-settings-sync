@@ -469,7 +469,7 @@ export class FolderStore {
         throw new Error(`Sync: Duplicate settings file name "${file.name}".`);
       }
       names.add(file.name);
-      await this.WriteAtomic(root, relative, file.content);
+      await this.WriteAtomic(root, relative, file.content, assertOwned);
       await assertOwned();
     }
     const stale =
@@ -503,7 +503,8 @@ export class FolderStore {
     await this.WriteAtomic(
       root,
       METADATA_FILE,
-      JSON.stringify({ ...metadata, files: Array.from(names).sort() }, null, 2)
+      JSON.stringify({ ...metadata, files: Array.from(names).sort() }, null, 2),
+      assertOwned
     );
     await assertOwned();
   }
@@ -511,7 +512,8 @@ export class FolderStore {
   private async WriteAtomic(
     root: string,
     relative: string,
-    content: string
+    content: string,
+    assertOwned: () => Promise<void>
   ): Promise<void> {
     const target = path.join(root, relative);
     await fs.ensureDir(path.dirname(target));
@@ -521,6 +523,11 @@ export class FolderStore {
     const temporary = `${target}.${process.pid}.${Date.now()}${TEMP_SUFFIX}`;
     try {
       await fs.writeFile(temporary, content, "utf8");
+      // Remote folders can block for long periods while writing a temporary
+      // file. Another machine can acquire a replacement lease meanwhile.
+      // Recheck right before publication, not only before/after this method:
+      // an after-write check cannot undo an already-overwritten settings file.
+      await assertOwned();
       await fs.rename(temporary, target);
     } finally {
       await fs.remove(temporary);

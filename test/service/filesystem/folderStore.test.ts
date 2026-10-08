@@ -390,13 +390,18 @@ describe("FolderStore", () => {
       const lock = path.join(folder, LOCK_FILE);
       const successor = "successor-export-owner";
       let tookOver = false;
-      store.WriteAtomic = async (root: string, relative: string, content: string) => {
+      store.WriteAtomic = async (
+        root: string,
+        relative: string,
+        content: string,
+        assertOwned: () => Promise<void>
+      ) => {
         if (!tookOver) {
           tookOver = true;
           await fs.remove(lock);
           await fs.outputFile(lock, successor);
         }
-        await originalWrite(root, relative, content);
+        await originalWrite(root, relative, content, assertOwned);
       };
 
       let error: Error = null;
@@ -412,6 +417,34 @@ describe("FolderStore", () => {
       expect(error.message).to.match(/lock ownership was lost/);
       expect(await fs.readFile(lock, "utf8")).to.equal(successor);
       expect(await fs.pathExists(path.join(folder, METADATA_FILE))).to.equal(false);
+    });
+
+    it("refuses late rename when export lease is lost during temporary write", async () => {
+      await fs.outputFile(path.join(folder, "settings.json"), "newer exporter");
+      const store: any = new FolderStore(folder);
+      let checks = 0;
+      let error: Error = null;
+      try {
+        await store.WriteAtomic(
+          await fs.realpath(folder),
+          "settings.json",
+          "stale old exporter",
+          async () => {
+            checks += 1;
+            throw new Error("Sync: Export lock ownership was lost");
+          }
+        );
+      } catch (err) {
+        error = err;
+      }
+      expect(checks).to.equal(1);
+      expect(error).to.not.equal(null);
+      expect(error.message).to.match(/ownership was lost/);
+      expect(await fs.readFile(path.join(folder, "settings.json"), "utf8")).to.equal(
+        "newer exporter"
+      );
+      // A rejected writer must not leave its candidate temporary artifact.
+      expect((await fs.readdir(folder)).sort()).to.deep.equal(["settings.json"]);
     });
 
     it("refuses to replace an export that arrived after it was read", async () => {
