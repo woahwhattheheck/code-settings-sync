@@ -19,24 +19,51 @@ export class EditorService {
       );
       return false;
     }
-    await EditorService.CloseCleanEditors(filePath);
+    if (!(await EditorService.CloseCleanEditors(filePath))) {
+      return false;
+    }
+    // A hidden editor may have become dirty while closing clean target tabs.
+    if (HasDirtyDocument(vscode.workspace.textDocuments, filePath)) {
+      vscode.window.showWarningMessage(
+        `Sync : ${filePath} has unsaved changes in an editor and was not overwritten. Save or revert it, then download again.`
+      );
+      return false;
+    }
     return FileService.WriteFile(filePath, content);
   }
 
-  private static async CloseCleanEditors(filePath: string): Promise<void> {
+  private static async CloseCleanEditors(filePath: string): Promise<boolean> {
     const target = normalizeFilePath(filePath);
     const editors = vscode.window.visibleTextEditors.filter(
       editor => normalizeFilePath(editor.document.fileName) === target
     );
     for (const editor of editors) {
-      await vscode.window.showTextDocument(editor.document, {
+      const shown = await vscode.window.showTextDocument(editor.document, {
         viewColumn: editor.viewColumn,
-        preserveFocus: true,
+        preserveFocus: false,
         preview: false
       });
+      // closeActiveEditor targets the focused tab, not the document passed to
+      // showTextDocument. Refuse to close anything other than this sync target.
+      const active = vscode.window.activeTextEditor;
+      if (
+        !active ||
+        active.document !== shown.document ||
+        normalizeFilePath(active.document.fileName) !== target
+      ) {
+        throw new Error("Could not safely focus the file being downloaded.");
+      }
+      // Editing may resume while showTextDocument awaits the editor reveal.
+      if (active.document.isDirty) {
+        vscode.window.showWarningMessage(
+          `Sync : ${filePath} has unsaved changes in an editor and was not overwritten. Save or revert it, then download again.`
+        );
+        return false;
+      }
       await vscode.commands.executeCommand(
         "workbench.action.closeActiveEditor"
       );
     }
+    return true;
   }
 }
