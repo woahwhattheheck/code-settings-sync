@@ -1,4 +1,5 @@
 import * as fs from "fs-extra";
+import { randomBytes } from "crypto";
 import * as path from "path";
 
 /**
@@ -330,47 +331,121 @@ export class FolderStore {
   ): Promise<void> {
     await fs.ensureDir(this.folder);
     const root = await fs.realpath(this.folder);
-    const release = await this.Lock(root);
+    const lease = await this.Lock(root);
     try {
-      await this.WriteLocked(root, files, metadata, expected);
+      await lease.assertOwned();
+      await this.WriteLocked(root, files, metadata, expected, lease.assertOwned);
     } finally {
-      await release();
+      await lease.release();
     }
   }
 
-  private async Lock(root: string): Promise<() => Promise<void>> {
+  private async Lock(root: string): Promise<{
+    assertOwned: () => Promise<void>;
+    renew: () => Promise<void>;
+    release: () => Promise<void>;
+  }> {
     const lockPath = path.join(root, LOCK_FILE);
+    const busy = () =>
+      new Error(`Sync: Another export to ${this.folder} is in progress. Try again in a moment.`);
     let handle: number;
     try {
       handle = await fs.open(lockPath, "wx");
     } catch (err) {
-      if (err.code !== "EEXIST") {
-        throw err;
+      if (err.code !== "EEXIST") throw err;
+      const first = await fs.lstat(lockPath).catch(() => null);
+      if (!first || !first.isFile() || Date.now() - first.mtimeMs < STALE_LOCK_MS) {
+        throw busy();
       }
-      const stats = await fs.lstat(lockPath).catch(() => null);
-      if (stats && Date.now() - stats.mtimeMs < STALE_LOCK_MS) {
-        throw new Error(
-          `Sync: Another export to ${this.folder} is in progress. Try again in a moment.`
-        );
+      // Confirm that the stale file did not renew or change ownership while
+      // we examined it. A live exporter refreshes its open inode periodically.
+      const again = await fs.lstat(lockPath).catch(() => null);
+      if (!again || !again.isFile() || Date.now() - again.mtimeMs < STALE_LOCK_MS ||
+          again.dev !== first.dev || again.ino !== first.ino ||
+          again.mtimeMs !== first.mtimeMs || again.size !== first.size) {
+        throw busy();
       }
-      await fs.remove(lockPath);
-      handle = await fs.open(lockPath, "wx");
+      await fs.unlink(lockPath);
+      try {
+        handle = await fs.open(lockPath, "wx");
+      } catch (createError) {
+        if (createError.code === "EEXIST") throw busy();
+        throw createError;
+      }
     }
-    return async () => {
+
+    // A random owner token plus the open inode distinguish this exporter from
+    // a replacement lease. Never remove another writer's lock on release.
+    const token = randomBytes(16).toString("hex");
+    try {
+      await fs.writeFile(lockPath, token, "utf8");
+    } catch (err) {
+      await fs.close(handle);
+      throw err;
+    }
+    const opened = await fs.fstat(handle);
+    let released = false;
+    let lost = false;
+    const ownsLock = async (): Promise<boolean> => {
+      if (released) return false;
+      try {
+        const [current, body] = await Promise.all([
+          fs.lstat(lockPath), fs.readFile(lockPath, "utf8")
+        ]);
+        return current.isFile() && current.dev === opened.dev &&
+          current.ino === opened.ino && body === token;
+      } catch (err) {
+        return false;
+      }
+    };
+    const assertOwned = async (): Promise<void> => {
+      if (lost || !(await ownsLock())) {
+        throw new Error("Sync: Export lock ownership was lost; refusing concurrent settings writes.");
+      }
+    };
+    const renew = async (): Promise<void> => {
+      if (released || lost) return;
+      if (!(await ownsLock())) { lost = true; return; }
+      try {
+        // Touch the opened inode, not a path another process may replace.
+        const now = new Date();
+        await fs.futimes(handle, now, now);
+        if (!(await ownsLock())) lost = true;
+      } catch (err) {
+        lost = true;
+      }
+    };
+    let pending = Promise.resolve();
+    const heartbeat = setInterval(() => {
+      pending = pending.then(renew).catch(() => { lost = true; });
+    }, STALE_LOCK_MS / 4);
+    if ((heartbeat as any).unref) (heartbeat as any).unref();
+    const release = async (): Promise<void> => {
+      clearInterval(heartbeat);
+      await pending;
+      const owned = await ownsLock();
+      released = true;
       try {
         await fs.close(handle);
       } finally {
-        await fs.remove(lockPath);
+        // A stale exporter may have been superseded. Do not delete that
+        // later exporter's live lock when the older operation finishes.
+        if (owned && (await fs.readFile(lockPath, "utf8").catch(() => null)) === token) {
+          await fs.remove(lockPath);
+        }
       }
     };
+    return { assertOwned, renew, release };
   }
 
   private async WriteLocked(
     root: string,
     files: FolderFile[],
     metadata: FolderMetadata,
-    expected?: FolderMetadata | null
+    expected: FolderMetadata | null | undefined,
+    assertOwned: () => Promise<void>
   ): Promise<void> {
+    await assertOwned();
     let previous: FolderMetadata = null;
     try {
       previous = await this.ReadMetadata();
@@ -388,16 +463,19 @@ export class FolderStore {
     }
     const names = new Set<string>();
     for (const file of files) {
+      await assertOwned();
       const relative = ToRelativePath(file.name);
       if (file.name === METADATA_FILE || names.has(file.name)) {
         throw new Error(`Sync: Duplicate settings file name "${file.name}".`);
       }
       names.add(file.name);
       await this.WriteAtomic(root, relative, file.content);
+      await assertOwned();
     }
     const stale =
       previous && Array.isArray(previous.files) ? previous.files : [];
     for (const name of stale) {
+      await assertOwned();
       if (
         typeof name !== "string" ||
         names.has(name) ||
@@ -417,14 +495,17 @@ export class FolderStore {
         stats.isFile() &&
         IsInside(root, await fs.realpath(path.dirname(target)))
       ) {
+        await assertOwned();
         await fs.remove(target);
       }
     }
+    await assertOwned();
     await this.WriteAtomic(
       root,
       METADATA_FILE,
       JSON.stringify({ ...metadata, files: Array.from(names).sort() }, null, 2)
     );
+    await assertOwned();
   }
 
   private async WriteAtomic(
