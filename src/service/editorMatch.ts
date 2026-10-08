@@ -1,3 +1,4 @@
+import * as fs from "fs";
 import * as path from "path";
 
 export interface OpenDocument {
@@ -7,7 +8,17 @@ export interface OpenDocument {
 
 export function normalizeFilePath(filePath: string): string {
   const resolved = path.resolve(filePath);
-  return process.platform === "win32" ? resolved.toLowerCase() : resolved;
+  let canonical = resolved;
+  try {
+    // FileService.WriteFile follows symlinks. Resolve existing paths here too
+    // so a dirty document opened through the real target cannot be missed when
+    // Sync reaches the same file through a symlinked settings path.
+    canonical = fs.realpathSync(resolved);
+  } catch {
+    // Download targets may not exist yet; lexical normalization is sufficient
+    // until there is an on-disk identity to resolve.
+  }
+  return process.platform === "win32" ? canonical.toLowerCase() : canonical;
 }
 
 /**
