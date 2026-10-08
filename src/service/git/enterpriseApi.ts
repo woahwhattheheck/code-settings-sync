@@ -894,10 +894,16 @@ async function writeSettingsFile(
   }
   parseGitlabWrite(response.body, target.branch);
   const confirmed = await readSettingsFile(validated, options, target);
+  // GitLab's write reply omits the stored blob id. Verify the read-back
+  // content as well as its SHA so a subsequent writer is never represented
+  // as our successful upload.
+  if (!confirmed || confirmed.content !== content) {
+    throw new Error("Remote settings changed after upload; refresh before retrying.");
+  }
   return {
     content,
     branch: target.branch,
-    sha: confirmed ? confirmed.sha : null
+    sha: confirmed.sha
   };
 }
 
