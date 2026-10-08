@@ -1,0 +1,38 @@
+import { expect } from "chai";
+import * as path from "path";
+
+import { HasDirtyDocument } from "../../../src/service/editorMatch";
+
+describe("HasDirtyDocument", () => {
+  const target = path.join(__dirname, "settings.json");
+
+  it("returns true when an editor for the file has unsaved changes", () => {
+    expect(
+      HasDirtyDocument([{ fileName: target, isDirty: true }], target)
+    ).to.equal(true);
+  });
+
+  it("returns false when the editor for the file is clean", () => {
+    expect(
+      HasDirtyDocument([{ fileName: target, isDirty: false }], target)
+    ).to.equal(false);
+  });
+
+  it("ignores dirty editors for other files", () => {
+    const other = path.join(__dirname, "keybindings.json");
+    expect(
+      HasDirtyDocument([{ fileName: other, isDirty: true }], target)
+    ).to.equal(false);
+  });
+
+  it("matches relative and absolute spellings of the same path", () => {
+    const relative = path.relative(process.cwd(), target);
+    expect(
+      HasDirtyDocument([{ fileName: target, isDirty: true }], relative)
+    ).to.equal(true);
+  });
+
+  it("returns false for an empty list of open documents", () => {
+    expect(HasDirtyDocument([], target)).to.equal(false);
+  });
+});

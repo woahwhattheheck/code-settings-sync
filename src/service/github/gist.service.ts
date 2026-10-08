@@ -10,6 +10,7 @@ import { ISyncService } from "../../models/ISyncService.model";
 import { LocalConfig } from "../../models/localConfig.model";
 import { IExtensionState } from "../../models/state.model";
 import PragmaUtil from "../../pragmaUtil";
+import { EditorService } from "../editor.service";
 import { File, FileService } from "../file.service";
 import {
   ExtensionInformation,
@@ -639,7 +640,7 @@ export class GistService implements ISyncService {
             }
 
             actionList.push(
-              FileService.WriteFile(filePath, content)
+              EditorService.WriteFile(filePath, content)
                 .then(() => {
                   // TODO : add Name attribute in File and show information message here with name , when required.
                 })
