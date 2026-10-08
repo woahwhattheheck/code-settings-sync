@@ -5,7 +5,7 @@ import {
   IDownloadFileChange
 } from "../../src/service/download-change.service";
 import { File } from "../../src/service/file.service";
-import { ExtensionInformation } from "../../src/service/plugin.service";
+import { ExtensionInformation, PluginService } from "../../src/service/plugin.service";
 
 function file(gistName: string): File {
   return new File(gistName, "remote", "", gistName);
@@ -19,6 +19,43 @@ function extension(name: string): ExtensionInformation {
 }
 
 describe("DownloadChangeService", () => {
+  it("previews extension replacements by publisher-qualified ID", () => {
+    const local = extension("shared-name");
+    local.publisher = "publisher-one";
+    const remote = extension("shared-name");
+    remote.publisher = "publisher-two";
+    const original = PluginService.CreateExtensionList;
+    PluginService.CreateExtensionList = () => [local];
+    try {
+      const remoteJson = JSON.stringify([
+        {
+          name: remote.name,
+          publisher: remote.publisher,
+          version: "1",
+          metadata: {}
+        }
+      ]);
+      const install = PluginService.GetMissingExtensions(remoteJson, []);
+      const remove = PluginService.GetDeletedExtensions([remote], []);
+      const summary = DownloadChangeService.FormatChangeSummary(
+        DownloadChangeService.CreatePlan([], install, remove)
+      );
+      expect(install.map(ext => ext.publisher)).to.deep.equal(["publisher-two"]);
+      expect(remove.map(ext => ext.publisher)).to.deep.equal(["publisher-one"]);
+      expect(summary).to.contain("Extensions to install: publisher-two.shared-name");
+      expect(summary).to.contain("Extensions to remove: publisher-one.shared-name");
+
+      // The existing unqualified ignore list must still suppress this name.
+      expect(PluginService.GetMissingExtensions(remoteJson, ["shared-name"])).to.deep.equal([]);
+      expect(PluginService.GetDeletedExtensions([remote], ["shared-name"])).to.deep.equal([]);
+      remote.publisher = "PUBLISHER-ONE";
+      expect(PluginService.GetDeletedExtensions([remote], [])).to.deep.equal([]);
+    } finally {
+      PluginService.CreateExtensionList = original;
+    }
+  });
+
+
   it("excludes an unchanged effective file", () => {
     const change = DownloadChangeService.CreateFileChange(
       file("settings.json"),
