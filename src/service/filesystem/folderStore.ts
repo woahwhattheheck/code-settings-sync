@@ -65,6 +65,15 @@ export function ToRelativePath(name: string): string {
   return path.join(...parts);
 }
 
+/** Canonical relative destination identity for cross-OS collision checks. */
+export function DestinationKey(relativePath: string): string {
+  return relativePath
+    .split(path.sep)
+    .join("/")
+    .normalize("NFC")
+    .toLowerCase();
+}
+
 /** Inverse of ToRelativePath. */
 export function ToFileName(relativePath: string): string {
   const parts = relativePath.split(/[\\/]/);
@@ -496,7 +505,7 @@ export class FolderStore {
       // Different manifest names may normalize to one destination, e.g.
       // customized_sync|foo vs |customized_sync|foo. Case and Unicode
       // folding also prevent cross-OS folder collisions.
-      const destination = relative.split(path.sep).join("/").normalize("NFC").toLowerCase();
+      const destination = DestinationKey(relative);
       if (file.name === METADATA_FILE || names.has(file.name) ||
           destinations.has(destination)) {
         throw new Error(`Sync: Duplicate or reserved settings file name "${file.name}".`);

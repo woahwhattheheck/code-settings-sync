@@ -19,6 +19,7 @@ import {
 import {
   CheckFolder,
   CUSTOM_PREFIX,
+  DestinationKey,
   ExportName,
   FolderProblem,
   FolderStore,
@@ -352,14 +353,20 @@ export class FileSystemService implements ISyncService {
         throw new Error("Sync: Export file manifest is invalid.");
       }
       const declared = new Set<string>();
+      const destinations = new Set<string>();
       for (const name of metadata.files) {
         if (typeof name !== "string" || name === METADATA_FILE ||
             declared.has(name)) {
           throw new Error("Sync: Export file manifest has invalid or duplicate names.");
         }
-        // Reuse the store's traversal and symlink-safe path checks.
-        ToRelativePath(name);
+        // Reuse the store's traversal and symlink-safe path checks, then
+        // reject aliases that become one destination on another machine.
+        const destination = DestinationKey(ToRelativePath(name));
+        if (destinations.has(destination)) {
+          throw new Error("Sync: Export file manifest has invalid or duplicate names.");
+        }
         declared.add(name);
+        destinations.add(destination);
         if ((await store.ReadFile(name)) === null) {
           throw new Error("Sync: Export is incomplete; a listed settings file is missing.");
         }

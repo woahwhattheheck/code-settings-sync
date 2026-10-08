@@ -290,6 +290,27 @@ describe("FileSystemService", function() {
       .to.equal('{ "verified": 1 }');
   });
 
+  it("rejects manifest names that collide on another file system", async () => {
+    await fs.outputFile(path.join(folder, "settings.json"), '{ "remote": 1 }');
+    await fs.outputFile(path.join(folder, "SETTINGS.JSON"), '{ "alias": 1 }');
+    await fs.outputJson(path.join(folder, "cloudSettings"), {
+      lastUpload: "2026-10-08T00:00:00.000Z",
+      files: ["settings.json", "SETTINGS.JSON"]
+    });
+
+    const destinationUser = path.join(root, "collision-destination", "User");
+    await fs.outputFile(path.join(destinationUser, "settings.json"), '{ "local": 1 }');
+    const destination = Machine(destinationUser, OsType.Linux, () => undefined);
+    UseFolder(destination.custom, destination.ext);
+    await new FileSystemService(destination.state).Import();
+
+    expect(recorded.errors).to.have.length(1);
+    expect(recorded.errors[0]).to.match(/invalid or duplicate/i);
+    expect(await fs.readFile(path.join(destinationUser, "settings.json"), "utf8"))
+      .to.equal('{ "local": 1 }');
+    expect(destination.custom.fileSystemSettings.lastDownload).to.be.null;
+  });
+
   it("fails an incomplete export before writing files or recording lastDownload", async () => {
     const sourceUser = path.join(root, "missing-source", "User");
     await fs.outputFile(path.join(sourceUser, "settings.json"), '{ "remote": 1 }');
