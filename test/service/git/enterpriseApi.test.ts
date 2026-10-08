@@ -1325,6 +1325,7 @@ describe("enterprise repository API", () => {
           return { statusCode: 200, body: gitlabFile("old\n", "office") };
         }
         expect(JSON.parse(call.body).content).to.equal(FILE_TEXT);
+        expect(JSON.parse(call.body).last_commit_id).to.equal(SHA_C);
         return {
           statusCode: 200,
           body: { file_path: "settings-sync.json", branch: "office" }
@@ -1342,6 +1343,22 @@ describe("enterprise repository API", () => {
         "https://gitlab.example/api/v4/projects/group%2Fsettings/repository/files/settings-sync.json"
       );
       expectHost(session.calls, "https://gitlab.example/");
+    });
+
+    it("rejects a GitLab update without a trustworthy last commit", async () => {
+      const file = gitlabFile("old\n", "office");
+      delete file.last_commit_id;
+      const session = serve(() => ({ statusCode: 200, body: file }));
+      await expectRejection(
+        putSettingsFile(
+          settings("gitlab", "https://gitlab.example/api/v4", TOKEN),
+          fileTarget("group/settings", "office"),
+          FILE_TEXT,
+          { transport: session.transport }
+        ),
+        "The provider did not return a file last_commit_id."
+      );
+      expect(session.calls.map(call => call.method)).to.deep.equal(["GET"]);
     });
 
     it("does not create a branch when settings-sync.json is missing", async () => {
@@ -1554,6 +1571,67 @@ describe("enterprise repository API", () => {
       expectHost(session.calls, "https://git.example/");
     });
 
+    it("does not overwrite another writer's GitHub settings after a 409", async () => {
+      let reads = 0;
+      let writes = 0;
+      const session = serve(call => {
+        if (call.method === "GET") {
+          reads++;
+          return {
+            statusCode: 200,
+            body: githubFile(
+              reads === 1 ? SHA_A : SHA_B,
+              reads === 1 ? "old\n" : "teammate edit\n"
+            )
+          };
+        }
+        writes++;
+        return { statusCode: 409, body: { message: "stale" } };
+      });
+      await expectRejection(
+        putSettingsFile(
+          settings("github", "https://git.example/api/v3", TOKEN),
+          fileTarget("me/settings", "office"),
+          FILE_TEXT,
+          { transport: session.transport }
+        ),
+        "Remote settings changed during upload; refresh before overwriting."
+      );
+      expect(writes).to.equal(1);
+      expect(session.calls.map(call => call.method)).to.deep.equal([
+        "GET", "PUT", "GET"
+      ]);
+    });
+
+    it("recognizes a concurrently stored identical GitHub settings file", async () => {
+      let reads = 0;
+      const session = serve(call => {
+        if (call.method === "GET") {
+          reads++;
+          return {
+            statusCode: 200,
+            body: githubFile(
+              reads === 1 ? SHA_A : SHA_B,
+              reads === 1 ? "old\n" : FILE_TEXT
+            )
+          };
+        }
+        return { statusCode: 409, body: { message: "stale" } };
+      });
+      const written = await putSettingsFile(
+        settings("github", "https://git.example/api/v3", TOKEN),
+        fileTarget("me/settings", "office"),
+        FILE_TEXT,
+        { transport: session.transport }
+      );
+      expect(written).to.deep.equal({
+        content: FILE_TEXT, branch: "office", sha: SHA_B
+      });
+      expect(session.calls.map(call => call.method)).to.deep.equal([
+        "GET", "PUT", "GET"
+      ]);
+    });
+
     it("stops after a second stale GitHub upload", async () => {
       const shas: string[] = [];
       let reads = 0;
@@ -1727,6 +1805,7 @@ function gitlabFile(text: string, ref: string): { [key: string]: unknown } {
     encoding: "base64",
     content: Buffer.from(text, "utf8").toString("base64"),
     blob_id: SHA_A,
+    last_commit_id: SHA_C,
     ref,
     size: Buffer.byteLength(text)
   };
