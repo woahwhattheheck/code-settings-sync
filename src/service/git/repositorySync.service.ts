@@ -13,7 +13,7 @@ interface GitRunResult {
 }
 
 class GitCommandRunner {
-  public run(cwd: string, args: string[]): Promise<string> {
+  public run(cwd: string, args: string[], trimOutput = true): Promise<string> {
     return new Promise<string>((resolve, reject) => {
       execFile("git", args, { cwd }, (error, stdout, stderr) => {
         if (error) {
@@ -21,7 +21,7 @@ class GitCommandRunner {
           reject(new Error("Git " + args[0] + " failed: " + detail));
           return;
         }
-        resolve(stdout.trim());
+        resolve(trimOutput ? stdout.trim() : stdout);
       });
     });
   }
@@ -167,7 +167,7 @@ export class GitRepositorySyncService implements ISyncService {
       "--ignored",
       "--exclude-standard",
       "-z"
-    ]);
+    ], false);
     const paths = ignored.split("\0").filter(Boolean);
     // Bound argv length while preserving filename boundaries and the
     // destructive-command '--' separator. This changes only Git's index.
