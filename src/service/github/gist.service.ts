@@ -435,7 +435,7 @@ export class GistService implements ISyncService {
     const ignoredExtensions: string[] =
       customSettings.ignoreExtensions || new Array<string>();
     const updatedFiles: File[] = [];
-    const actionList: Array<Promise<void | boolean>> = [];
+    const writeResults: boolean[] = [];
     // Commit the downloaded version only after every requested file was saved.
     let downloadedUploadTime: Date = null;
 
@@ -646,8 +646,10 @@ export class GistService implements ISyncService {
               }
             }
 
-            actionList.push(
-              EditorService.WriteFile(filePath, content)
+            // EditorService closes the globally active tab, so each reveal,
+            // close and write must finish before another file changes focus.
+            writeResults.push(
+              await EditorService.WriteFile(filePath, content)
                 .then(written => {
                   // A dirty editor or failed write is not a successful sync.
                   return written;
@@ -666,9 +668,7 @@ export class GistService implements ISyncService {
       }
     }
 
-    const writeResults = await Promise.all(actionList);
-    // Collect every write result before throwing, so a failed early write
-    // cannot reject while later asynchronous files are still being prepared.
+    // Finish every requested write before reporting partial download failure.
     if (writeResults.some(written => written === false)) {
       throw new Error(
         "Sync: Some settings files were not saved. Resolve the conflict and retry the download."
