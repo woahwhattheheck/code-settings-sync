@@ -1,4 +1,6 @@
 import { expect } from "chai";
+import * as fs from "fs";
+import * as os from "os";
 import * as path from "path";
 
 import {
@@ -50,6 +52,27 @@ describe("DownloadChangeService", () => {
     for (const name of unsafe) {
       expect(() => DownloadChangeService.ResolveFilePath(base, name), name)
         .to.throw("Unsafe remote settings filename.");
+    }
+  });
+
+  it("refuses an in-tree link that redirects a download outside the user directory", () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "code-settings-sync-"));
+    const base = path.join(root, "settings");
+    const outside = path.join(root, "outside");
+    const link = path.join(base, "snippets");
+    fs.mkdirSync(base);
+    fs.mkdirSync(outside);
+    fs.symlinkSync(outside, link, process.platform === "win32" ? "junction" : "dir");
+
+    try {
+      expect(() =>
+        DownloadChangeService.ResolveFilePath(base, "snippets|javascript.json")
+      ).to.throw("Unsafe remote settings filename.");
+    } finally {
+      fs.unlinkSync(link);
+      fs.rmdirSync(base);
+      fs.rmdirSync(outside);
+      fs.rmdirSync(root);
     }
   });
 
