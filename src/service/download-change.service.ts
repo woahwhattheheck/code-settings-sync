@@ -56,21 +56,27 @@ export class DownloadChangeService {
   }
 
   public static ResolveFilePath(userFolder: string, fileName: string): string {
-    let parts: string[] | null = null;
-
-    if (fileName.indexOf("|") > -1) {
-      parts = fileName.split("|");
-    } else if (fileName.indexOf("//") > -1) {
-      parts = fileName.split("//");
-    } else if (fileName.indexOf("\\") > -1) {
-      parts = fileName.split("\\");
+    // Gist filenames can encode nested user files with | or slash separators.
+    // Never allow a remote filename to escape the VS Code user settings root.
+    if (
+      !fileName ||
+      path.posix.isAbsolute(fileName) ||
+      path.win32.isAbsolute(fileName) ||
+      fileName.indexOf(":") !== -1 ||
+      fileName.indexOf("\0") !== -1
+    ) {
+      throw new Error("Unsafe remote settings filename.");
     }
-
-    if (!parts) {
-      return userFolder + fileName;
+    const parts = fileName.split(/[|/\\]+/);
+    if (parts.some(part => !part || part === "." || part === "..")) {
+      throw new Error("Unsafe remote settings filename.");
     }
-
-    return userFolder + parts.join(path.sep);
+    const base = path.resolve(userFolder);
+    const target = path.resolve(base, ...parts);
+    if (target === base || !target.startsWith(base + path.sep)) {
+      throw new Error("Unsafe remote settings filename.");
+    }
+    return target;
   }
 
   public static FormatChangeSummary(plan: IDownloadChangePlan): string {
