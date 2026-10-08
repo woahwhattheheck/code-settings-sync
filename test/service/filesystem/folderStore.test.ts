@@ -307,6 +307,49 @@ describe("FolderStore", () => {
       );
     });
 
+    it("prevalidates the complete export manifest before mutating settings", async () => {
+      const cases = [
+        [
+          { name: "settings.json", content: "new" },
+          { name: METADATA_FILE, content: "reserved" }
+        ],
+        [
+          { name: "settings.json", content: "new" },
+          { name: "snippets|go.json", content: "{}" },
+          { name: "snippets|go.json", content: "{ \"duplicate\": true }" }
+        ],
+        [
+          { name: "settings.json", content: "new" },
+          { name: "customized_sync|foo.json", content: "first" },
+          { name: "|customized_sync|foo.json", content: "alias" }
+        ]
+      ];
+
+      for (const files of cases) {
+        await fs.remove(folder);
+        const store = new FolderStore(folder);
+        const baseline = "2026-10-01T10:00:00.000Z";
+        await store.Write([{ name: "settings.json", content: "old" }], {
+          lastUpload: baseline
+        });
+
+        let error: Error = null;
+        try {
+          await store.Write(files, {
+            lastUpload: "2026-10-02T10:00:00.000Z"
+          });
+        } catch (err) {
+          error = err;
+        }
+
+        expect(error).to.not.equal(null);
+        expect(await store.ReadFile("settings.json")).to.equal("old");
+        expect((await store.ReadMetadata()).lastUpload).to.equal(baseline);
+        expect(await store.ReadFile("snippets|go.json")).to.equal(null);
+        expect(await store.ReadFile("|customized_sync|foo.json")).to.equal(null);
+      }
+    });
+
     it("does not follow symbolic links out of the folder", async function() {
       const outside = path.join(root, "outside");
       await fs.outputFile(path.join(outside, "secret.json"), "{}");
