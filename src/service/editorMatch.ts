@@ -6,6 +6,21 @@ export interface OpenDocument {
   isDirty: boolean;
 }
 
+function canonicalizeMissingPath(filePath: string): string {
+  const parent = path.dirname(filePath);
+  if (parent === filePath) {
+    return filePath;
+  }
+  try {
+    return path.join(fs.realpathSync(parent), path.basename(filePath));
+  } catch {
+    return path.join(
+      canonicalizeMissingPath(parent),
+      path.basename(filePath)
+    );
+  }
+}
+
 export function normalizeFilePath(filePath: string): string {
   const resolved = path.resolve(filePath);
   let canonical = resolved;
@@ -15,17 +30,23 @@ export function normalizeFilePath(filePath: string): string {
     // Sync reaches the same file through a symlinked settings path.
     canonical = fs.realpathSync(resolved);
   } catch {
-    // The leaf may not exist yet even though its parent does. Resolve that
-    // parent so a new file reached through a symlink still has the same
-    // identity as an unsaved document opened through the real parent.
     try {
-      canonical = path.join(
-        fs.realpathSync(path.dirname(resolved)),
-        path.basename(resolved)
-      );
+      // A dangling symlink still aliases the path fs.writeFile will follow.
+      // Resolve its link target even when the target file does not exist yet.
+      const stats = fs.lstatSync(resolved);
+      if (stats.isSymbolicLink()) {
+        const linkTarget = path.resolve(
+          path.dirname(resolved),
+          fs.readlinkSync(resolved)
+        );
+        canonical = canonicalizeMissingPath(linkTarget);
+      } else {
+        canonical = canonicalizeMissingPath(resolved);
+      }
     } catch {
-      // Multiple missing ancestors have no on-disk identity yet; retain the
-      // lexical normalization until their directory tree exists.
+      // Ordinary missing files can still have symlinked or partially missing
+      // parents. Canonicalize the nearest existing ancestor before comparing.
+      canonical = canonicalizeMissingPath(resolved);
     }
   }
   return process.platform === "win32" ? canonical.toLowerCase() : canonical;
