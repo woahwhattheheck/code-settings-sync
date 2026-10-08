@@ -1318,14 +1318,19 @@ describe("enterprise repository API", () => {
 
     it("updates an existing GitLab file with PUT", async () => {
       const methods: string[] = [];
+      let updated = false;
       const session = serve(call => {
         methods.push(call.method);
         expect(call.privateToken).to.equal(TOKEN);
         if (call.method === "GET") {
-          return { statusCode: 200, body: gitlabFile("old\n", "office") };
+          return {
+            statusCode: 200,
+            body: gitlabFile(updated ? FILE_TEXT : "old\n", "office")
+          };
         }
         expect(JSON.parse(call.body).content).to.equal(FILE_TEXT);
         expect(JSON.parse(call.body).last_commit_id).to.equal(SHA_C);
+        updated = true;
         return {
           statusCode: 200,
           body: { file_path: "settings-sync.json", branch: "office" }
@@ -1343,6 +1348,29 @@ describe("enterprise repository API", () => {
         "https://gitlab.example/api/v4/projects/group%2Fsettings/repository/files/settings-sync.json"
       );
       expectHost(session.calls, "https://gitlab.example/");
+    });
+
+    it("does not report another writer's GitLab content as our upload", async () => {
+      const session = serve(call =>
+        call.method === "GET"
+          ? { statusCode: 200, body: gitlabFile("other\n", "office") }
+          : {
+              statusCode: 200,
+              body: { file_path: "settings-sync.json", branch: "office" }
+            }
+      );
+      await expectRejection(
+        putSettingsFile(
+          settings("gitlab", "https://gitlab.example/api/v4", TOKEN),
+          fileTarget("group/settings", "office"),
+          FILE_TEXT,
+          { transport: session.transport }
+        ),
+        "Remote settings changed after upload; refresh before retrying."
+      );
+      expect(session.calls.map(call => call.method)).to.deep.equal([
+        "GET", "PUT", "GET"
+      ]);
     });
 
     it("rejects a GitLab update without a trustworthy last commit", async () => {
