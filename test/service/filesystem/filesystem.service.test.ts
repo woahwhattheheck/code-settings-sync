@@ -12,6 +12,7 @@ import { CustomConfig } from "../../../src/models/customConfig.model";
 import { ExtensionConfig } from "../../../src/models/extensionConfig.model";
 import { IExtensionState } from "../../../src/models/state.model";
 import { FileSystemService } from "../../../src/service/filesystem/filesystem.service";
+import { FileService } from "../../../src/service/file.service";
 import { state as globalState } from "../../../src/state";
 
 interface IMachine {
@@ -220,6 +221,65 @@ describe("FileSystemService", function() {
     expect(
       await fs.readFile(path.join(userB, "settings.json"), "utf8")
     ).to.equal('{ "a": 1 }');
+  });
+
+
+  it("leaves failed file writes pending so the next import can retry", async () => {
+    const userA = path.join(root, "source", "User");
+    await fs.outputFile(path.join(userA, "settings.json"), '{ "remote": 1 }');
+    const source = Machine(userA, OsType.Linux, () => undefined);
+    UseFolder(source.custom, source.ext);
+    await new FileSystemService(source.state).Export();
+
+    const userB = path.join(root, "destination", "User");
+    const destination = Machine(userB, OsType.Linux, () => undefined);
+    UseFolder(destination.custom, destination.ext);
+    const target = path.join(userB, "settings.json");
+    const originalWrite = FileService.WriteFile;
+    FileService.WriteFile = async (filename, data) =>
+      filename === target ? false : originalWrite(filename, data);
+    try {
+      await new FileSystemService(destination.state).Import();
+    } finally {
+      FileService.WriteFile = originalWrite;
+    }
+
+    expect(recorded.errors).to.have.length(1);
+    expect(destination.custom.fileSystemSettings.lastDownload).to.be.null;
+    expect(await fs.pathExists(target)).to.be.false;
+
+    await new FileSystemService(destination.state).Import();
+    expect(await fs.readFile(target, "utf8")).to.equal('{ "remote": 1 }');
+    expect(destination.custom.fileSystemSettings.lastDownload).not.to.be.null;
+  });
+
+  it("does not mark the import complete if saving local sync options fails", async () => {
+    const userA = path.join(root, "source", "User");
+    await fs.outputFile(path.join(userA, "settings.json"), '{ "remote": 2 }');
+    const source = Machine(userA, OsType.Linux, () => undefined);
+    UseFolder(source.custom, source.ext);
+    await new FileSystemService(source.state).Export();
+
+    const userB = path.join(root, "destination", "User");
+    const destination = Machine(userB, OsType.Linux, () => undefined);
+    UseFolder(destination.custom, destination.ext);
+    const commons = destination.state.commons as any;
+    const originalSave = commons.SaveSettings;
+    commons.SaveSettings = async () => false;
+    try {
+      await new FileSystemService(destination.state).Import();
+    } finally {
+      commons.SaveSettings = originalSave;
+    }
+
+    expect(recorded.errors).to.have.length(1);
+    expect(destination.custom.fileSystemSettings.lastDownload).to.be.null;
+    const target = path.join(userB, "settings.json");
+    await fs.writeFile(target, '{ "local": 2 }');
+
+    await new FileSystemService(destination.state).Import();
+    expect(await fs.readFile(target, "utf8")).to.equal('{ "remote": 2 }');
+    expect(destination.custom.fileSystemSettings.lastDownload).not.to.be.null;
   });
 
   it("asks before replacing a newer export from another machine", async () => {
