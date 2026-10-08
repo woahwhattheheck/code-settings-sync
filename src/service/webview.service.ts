@@ -10,9 +10,11 @@ import { UISettingType } from "../models/settingType.model";
 import { IWebview } from "../models/webview.model";
 import { state } from "../state";
 import { createPrivateRepository } from "./git/enterpriseApi";
+import { repositorySettingsFromMessage } from "./git/repositorySettings";
 import { GitHubOAuthService } from "./github/github.oauth.service";
 
 export class WebviewService {
+  private settingsQueue: Promise<void> = Promise.resolve();
   private globalSettings = [
     {
       name: localize("ext.globalConfig.token.name"),
@@ -26,49 +28,6 @@ export class WebviewService {
       type: UISettingType.TextInput,
       correspondingSetting: "githubSettings.enterpriseUrl"
     },
-    {
-      name: "Sync Storage",
-      placeholder: "Enter gist or repository",
-      type: UISettingType.TextInput,
-      correspondingSetting: "repositorySync.mode"
-    },
-    {
-      name: "Repository Provider",
-      placeholder: "Enter github or gitlab",
-      type: UISettingType.TextInput,
-      correspondingSetting: "repositorySync.provider"
-    },
-    {
-      name: "Repository API URL",
-      placeholder: "Enter the GitHub or GitLab API root",
-      type: UISettingType.TextInput,
-      correspondingSetting: "repositorySync.apiUrl"
-    },
-    {
-      name: "Repository Credential",
-      placeholder: "Enter repository credential",
-      type: UISettingType.TextInput,
-      correspondingSetting: "repositorySync.token"
-    },
-    {
-      name: "Repository",
-      placeholder: "Enter owner/name or group/name",
-      type: UISettingType.TextInput,
-      correspondingSetting: "repositorySync.repository"
-    },
-    {
-      name: "Repository Remote URL",
-      placeholder: "Enter an HTTPS, SSH, or local Git repository URL",
-      type: UISettingType.TextInput,
-      correspondingSetting: "repositorySync.remoteUrl"
-    },
-    {
-      name: "Repository Branch / Profile",
-      placeholder: "Enter branch name (for example master or office)",
-      type: UISettingType.TextInput,
-      correspondingSetting: "repositorySync.branch"
-    },
-
     {
       name: localize("ext.globalConfig.ignoreUploadFolders.name"),
       placeholder: localize("ext.globalConfig.ignoreUploadFolders.placeholder"),
@@ -283,66 +242,99 @@ export class WebviewService {
       }
     );
     settingsPanel.webview.html = content;
-    settingsPanel.webview.onDidReceiveMessage(async message => {
-      if (message && message.command === "createRepository") {
-        try {
-          const customConfig = await state.commons.GetCustomSettings();
-          const repository = customConfig.repositorySync;
-          const created = await createPrivateRepository(
-            {
-              provider: repository.provider,
-              apiUrl: repository.apiUrl,
-              token: repository.token
-            },
-            String(repository.repository || "").trim()
-          );
-          repository.remoteUrl = created.cloneUrl;
-          repository.mode = "repository";
-          if (!(await state.commons.SetCustomSettings(customConfig))) {
-            throw new Error(
-              "Repository created, but the repository-sync settings could not be saved."
-            );
-          }
-          this.UpdateSettingsPage(customConfig, extSettings);
-          vscode.window.showInformationMessage(
-            "Sync: Private repository created and selected for repository sync."
-          );
-        } catch (error) {
+    settingsPanel.webview.onDidReceiveMessage(message => {
+      this.settingsQueue = this.settingsQueue
+        .then(() => this.ReceiveSettingsMessage(message, settingsPanel))
+        .catch(error => {
           Commons.LogException(error, state.commons.ERROR_MESSAGE, true);
-        }
-        return;
-      }
-      if (message === "openGist") {
-        const [customConfig, extConfig] = await Promise.all([
-          state.commons.GetCustomSettings(),
-          state.commons.GetSettings()
-        ]);
-        const host = customConfig.githubSettings.enterpriseUrl
-          ? new URL(customConfig.githubSettings.enterpriseUrl)
-          : new URL("https://github.com");
-        const username = await new GitHubOAuthService(0).getUser(
-          customConfig.githubSettings.token,
-          host
-        );
-        if (!username) {
-          return Commons.LogException(
-            null,
-            "Sync: Invalid Access Token.",
-            true
-          );
-        }
-        vscode.env.openExternal(
-          vscode.Uri.parse(
-            `https://gist.${host.hostname}/${username}/${extConfig.gist}`
-          )
-        );
-        return;
-      }
-      this.ReceiveSettingChange(message, customSettings, extSettings);
+        });
     });
     webview.webview = settingsPanel;
     settingsPanel.onDidDispose(() => (webview.webview = null));
     return settingsPanel;
+  }
+
+  private async ReceiveSettingsMessage(
+    message: any,
+    panel: vscode.WebviewPanel
+  ): Promise<void> {
+    if (
+      message &&
+      (message.command === "createRepository" ||
+        message.command === "saveRepositorySettings")
+    ) {
+      let createdSettings;
+      try {
+        const create = message.command === "createRepository";
+        const repository = repositorySettingsFromMessage(
+          message.settings,
+          create
+        );
+        if (create) {
+          const created = await createPrivateRepository(
+            repository,
+            repository.repository
+          );
+          repository.remoteUrl = created.cloneUrl;
+          repository.mode = "repository";
+          createdSettings = repository;
+        }
+        // Load after the provider call so other configuration changes survive.
+        const customConfig = await state.commons.GetCustomSettings();
+        customConfig.repositorySync = repository;
+        if (!(await state.commons.SetCustomSettings(customConfig))) {
+          throw new Error(
+            createdSettings
+              ? "Repository created, but settings could not be saved. The remote is shown below; use Save sync storage without creating again."
+              : "Sync storage could not be saved."
+          );
+        }
+        await panel.webview.postMessage({
+          command: "repositorySettingsResult",
+          ok: true,
+          settings: repository,
+          message: create
+            ? "Private repository created and selected. Git must have access to this remote before your first sync."
+            : "Sync storage saved."
+        });
+      } catch (error) {
+        await panel.webview.postMessage({
+          command: "repositorySettingsResult",
+          ok: false,
+          settings: createdSettings,
+          message:
+            error instanceof Error
+              ? error.message
+              : "Unable to save sync storage."
+        });
+      }
+      return;
+    }
+    const [customConfig, extConfig] = await Promise.all([
+      state.commons.GetCustomSettings(),
+      state.commons.GetSettings()
+    ]);
+    if (message === "openGist") {
+      const host = customConfig.githubSettings.enterpriseUrl
+        ? new URL(customConfig.githubSettings.enterpriseUrl)
+        : new URL("https://github.com");
+      const username = await new GitHubOAuthService(0).getUser(
+        customConfig.githubSettings.token,
+        host
+      );
+      if (!username) {
+        Commons.LogException(null, "Sync: Invalid Access Token.", true);
+        return;
+      }
+      vscode.env.openExternal(
+        vscode.Uri.parse(
+          `https://gist.${host.hostname}/${username}/${extConfig.gist}`
+        )
+      );
+      return;
+    }
+    if (!message || typeof message.command !== "string") return;
+    await this.ReceiveSettingChange(message, customConfig, extConfig);
   }
 
   public UpdateSettingsPage(
@@ -360,7 +352,7 @@ export class WebviewService {
     }
   }
 
-  public ReceiveSettingChange(
+  public async ReceiveSettingChange(
     message: {
       command: string;
       text: string;
@@ -376,11 +368,11 @@ export class WebviewService {
     if (message.type === "global") {
       if (has(customSettings, message.command)) {
         set(customSettings, message.command, value);
-        state.commons.SetCustomSettings(customSettings);
+        await state.commons.SetCustomSettings(customSettings);
       }
-    } else {
+    } else if (message.type === "env") {
       extSettings[message.command] = value;
-      state.commons.SaveSettings(extSettings);
+      await state.commons.SaveSettings(extSettings);
     }
   }
 
@@ -517,17 +509,22 @@ export class WebviewService {
   }
 
   private GenerateContent(options: any) {
+    const serialize = (value: unknown) =>
+      JSON.stringify(value)
+        .replace(/</g, "\\u003c")
+        .replace(/\u2028/g, "\\u2028")
+        .replace(/\u2029/g, "\\u2029");
     const toReplace: Array<Record<string, unknown>> = [];
     options.items.forEach(option => {
       if (typeof option.replace === "string") {
         toReplace.push({
           ...option,
-          replace: JSON.stringify(options[option.replace])
+          replace: serialize(options[option.replace])
         });
       } else {
         toReplace.push({
           find: option.find,
-          replace: JSON.stringify(option.replace)
+          replace: serialize(option.replace)
         });
       }
     });
@@ -535,7 +532,8 @@ export class WebviewService {
     return toReplace
       .reduce(
         // eslint-disable-next-line @typescript-eslint/no-unsafe-return
-        (acc, cur: any) => acc.replace(new RegExp(cur.find, "g"), cur.replace),
+        (acc, cur: any) =>
+          acc.replace(new RegExp(cur.find, "g"), () => cur.replace),
         options.content
       )
       .replace(
