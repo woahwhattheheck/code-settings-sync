@@ -278,7 +278,7 @@ export class GitRepositorySyncService implements ISyncService {
     );
     const unmanaged = existing.replace(pattern, "");
     const separator =
-      unmanaged && !/[\\r\\n]$/.test(unmanaged) ? "\n" : "";
+      unmanaged && !/[\r\n]$/.test(unmanaged) ? "\n" : "";
     const managed = [
       start,
       ...customSettings.ignoreUploadFiles,
