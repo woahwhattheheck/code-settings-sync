@@ -1,0 +1,324 @@
+// The stub has to be imported before anything that loads "vscode".
+import { answers, recorded, ResetStub, usingStub } from "./vscode.stub";
+
+import { expect } from "chai";
+import * as fs from "fs-extra";
+import * as os from "os";
+import * as path from "path";
+
+import { OsType } from "../../../src/enums/osType.enum";
+import { SyncMethod } from "../../../src/enums/syncMethod.enum";
+import { CustomConfig } from "../../../src/models/customConfig.model";
+import { ExtensionConfig } from "../../../src/models/extensionConfig.model";
+import { IExtensionState } from "../../../src/models/state.model";
+import { FileSystemService } from "../../../src/service/filesystem/filesystem.service";
+import { state as globalState } from "../../../src/state";
+
+interface IMachine {
+  state: IExtensionState;
+  user: string;
+  custom: CustomConfig;
+  ext: ExtensionConfig;
+  summaries: unknown[][];
+}
+
+const clone = <T>(value: T): T => JSON.parse(JSON.stringify(value));
+
+function Environment(user: string, osType: OsType) {
+  return {
+    USER_FOLDER: user + path.sep,
+    OsType: osType,
+    FILE_EXTENSION_NAME: "extensions.json",
+    FILE_EXTENSION: path.join(user, "extensions.json"),
+    FILE_SETTING_NAME: "settings.json",
+    FILE_KEYBINDING_MAC: "keybindingsMac.json",
+    getVersion: () => "3.4.4"
+  };
+}
+
+function Machine(
+  user: string,
+  osType: OsType,
+  configure: (custom: CustomConfig, ext: ExtensionConfig) => void
+): IMachine {
+  globalState.environment = Environment(user, osType) as any;
+  const machine: IMachine = {
+    state: null,
+    user,
+    custom: new CustomConfig(),
+    ext: new ExtensionConfig(),
+    summaries: []
+  };
+  configure(machine.custom, machine.ext);
+  const commons = {
+    ERROR_MESSAGE: "Sync: error",
+    InitalizeSettings: async () => ({
+      publicGist: false,
+      userName: null,
+      name: null,
+      extConfig: clone(machine.ext),
+      customConfig: clone(machine.custom)
+    }),
+    GetCustomSettings: async () => clone(machine.custom),
+    SetCustomSettings: async (custom: CustomConfig) => {
+      machine.custom = clone(custom);
+      return true;
+    },
+    GetSettings: () => clone(machine.ext),
+    SaveSettings: async (ext: ExtensionConfig) => {
+      machine.ext = clone(ext);
+      return true;
+    },
+    ShowSummaryOutput: (...args: unknown[]) => machine.summaries.push(args),
+    webviewService: { UpdateSettingsPage: () => undefined }
+  };
+  machine.state = {
+    instanceID: "test",
+    commons: commons as any,
+    environment: Environment(user, osType) as any,
+    watcher: {
+      HandleStartWatching: async () => undefined,
+      HandleStopWatching: async () => undefined
+    } as any
+  };
+  return machine;
+}
+
+describe("FileSystemService", function() {
+  let root: string;
+  let folder: string;
+
+  before(function() {
+    if (!usingStub) {
+      // Inside the VS Code test host the real API would open dialogs.
+      this.skip();
+    }
+  });
+
+  beforeEach(async () => {
+    ResetStub();
+    root = await fs.mkdtemp(path.join(os.tmpdir(), "settings-sync-service-"));
+    folder = path.join(root, "OneDrive", "vscode-settings");
+  });
+
+  afterEach(async () => {
+    await fs.remove(root);
+  });
+
+  function UseFolder(custom: CustomConfig, ext: ExtensionConfig) {
+    custom.syncMethod = SyncMethod.FileSystem;
+    custom.fileSystemSettings.path = folder;
+    ext.quietSync = true;
+  }
+
+  it("exports from macOS and imports on Linux and macOS", async () => {
+    const macUser = path.join(root, "mac", "User");
+    await fs.outputFile(
+      path.join(macUser, "settings.json"),
+      '{\n  // @sync os=linux\n  "linuxOnly": 1,\n  // @sync os=mac\n  "macOnly": 1\n}'
+    );
+    await fs.outputFile(path.join(macUser, "keybindings.json"), '["mac"]');
+    await fs.outputFile(path.join(macUser, "snippets", "go.json"), "{}");
+    await fs.outputFile(path.join(macUser, "state.vscdb"), "binary");
+    await fs.outputFile(path.join(root, "mac", ".eslintrc"), "root: true");
+    const mac = Machine(macUser, OsType.Mac, custom => {
+      custom.customFiles = { ".eslintrc": path.join(root, "mac", ".eslintrc") };
+    });
+    UseFolder(mac.custom, mac.ext);
+
+    await new FileSystemService(mac.state).Export();
+
+    expect(recorded.errors).to.deep.equal([]);
+    expect(await fs.pathExists(path.join(folder, "keybindingsMac.json"))).to.be
+      .true;
+    expect(await fs.pathExists(path.join(folder, "keybindings.json"))).to.be
+      .false;
+    expect(await fs.pathExists(path.join(folder, "state.vscdb"))).to.be.false;
+    expect(
+      await fs.readFile(path.join(folder, "snippets", "go.json"), "utf8")
+    ).to.equal("{}");
+    expect(
+      await fs.readFile(
+        path.join(folder, "customized_sync", ".eslintrc"),
+        "utf8"
+      )
+    ).to.equal("root: true");
+    expect(
+      JSON.parse(
+        await fs.readFile(path.join(folder, "extensions.json"), "utf8")
+      )
+    ).to.deep.equal([]);
+    const metadata = JSON.parse(
+      await fs.readFile(path.join(folder, "cloudSettings"), "utf8")
+    );
+    expect(metadata.extensionVersion).to.equal("v3.4.4");
+    expect(
+      new Date(mac.custom.fileSystemSettings.lastUpload).getTime()
+    ).to.equal(new Date(metadata.lastUpload).getTime());
+
+    const linuxUser = path.join(root, "linux", "User");
+    await fs.outputFile(path.join(linuxUser, "settings.json"), "{}");
+    await fs.outputFile(path.join(linuxUser, "keybindings.json"), '["linux"]');
+    const linux = Machine(linuxUser, OsType.Linux, custom => {
+      custom.customFiles = {
+        ".eslintrc": path.join(root, "linux", "home", ".eslintrc")
+      };
+    });
+    UseFolder(linux.custom, linux.ext);
+
+    await new FileSystemService(linux.state).Import();
+
+    expect(recorded.errors).to.deep.equal([]);
+    const linuxSettings = await fs.readFile(
+      path.join(linuxUser, "settings.json"),
+      "utf8"
+    );
+    expect(linuxSettings).to.match(/\n\s+"linuxOnly": 1/);
+    expect(linuxSettings).to.match(/\/\/\s*"macOnly": 1/);
+    expect(
+      await fs.readFile(path.join(linuxUser, "keybindings.json"), "utf8")
+    ).to.equal('["linux"]');
+    expect(
+      await fs.readFile(path.join(linuxUser, "snippets", "go.json"), "utf8")
+    ).to.equal("{}");
+    expect(
+      await fs.readFile(path.join(root, "linux", "home", ".eslintrc"), "utf8")
+    ).to.equal("root: true");
+    expect(
+      new Date(linux.custom.fileSystemSettings.lastDownload).getTime()
+    ).to.equal(new Date(metadata.lastUpload).getTime());
+
+    const otherMacUser = path.join(root, "mac2", "User");
+    const otherMac = Machine(otherMacUser, OsType.Mac, () => undefined);
+    UseFolder(otherMac.custom, otherMac.ext);
+    await new FileSystemService(otherMac.state).Import();
+    expect(
+      await fs.readFile(path.join(otherMacUser, "keybindings.json"), "utf8")
+    ).to.equal('["mac"]');
+  });
+
+  it("skips an import that is already applied unless forceDownload is on", async () => {
+    const userA = path.join(root, "a", "User");
+    await fs.outputFile(path.join(userA, "settings.json"), '{ "a": 1 }');
+    const a = Machine(userA, OsType.Linux, () => undefined);
+    UseFolder(a.custom, a.ext);
+    await new FileSystemService(a.state).Export();
+
+    const userB = path.join(root, "b", "User");
+    const b = Machine(userB, OsType.Linux, () => undefined);
+    UseFolder(b.custom, b.ext);
+    await new FileSystemService(b.state).Import();
+    await fs.writeFile(path.join(userB, "settings.json"), '{ "local": 1 }');
+
+    await new FileSystemService(b.state).Import();
+    expect(
+      await fs.readFile(path.join(userB, "settings.json"), "utf8")
+    ).to.equal('{ "local": 1 }');
+
+    b.ext.forceDownload = true;
+    await new FileSystemService(b.state).Import();
+    expect(
+      await fs.readFile(path.join(userB, "settings.json"), "utf8")
+    ).to.equal('{ "a": 1 }');
+  });
+
+  it("asks before replacing a newer export from another machine", async () => {
+    const userA = path.join(root, "a", "User");
+    await fs.outputFile(path.join(userA, "settings.json"), '{ "a": 1 }');
+    const a = Machine(userA, OsType.Linux, () => undefined);
+    UseFolder(a.custom, a.ext);
+    await new FileSystemService(a.state).Export();
+
+    const userB = path.join(root, "b", "User");
+    await fs.outputFile(path.join(userB, "settings.json"), '{ "b": 1 }');
+    const b = Machine(userB, OsType.Linux, () => undefined);
+    UseFolder(b.custom, b.ext);
+
+    answers.info.push("No");
+    await new FileSystemService(b.state).Export();
+    expect(recorded.info).to.have.length(1);
+    expect(
+      await fs.readFile(path.join(folder, "settings.json"), "utf8")
+    ).to.equal('{ "a": 1 }');
+
+    answers.info.push("Yes");
+    await new FileSystemService(b.state).Export();
+    expect(
+      await fs.readFile(path.join(folder, "settings.json"), "utf8")
+    ).to.equal('{ "b": 1 }');
+  });
+
+  it("leaves an unchanged export alone and removes deleted snippets", async () => {
+    const user = path.join(root, "a", "User");
+    await fs.outputFile(path.join(user, "settings.json"), "{}");
+    await fs.outputFile(path.join(user, "snippets", "go.json"), "{}");
+    const a = Machine(user, OsType.Linux, () => undefined);
+    UseFolder(a.custom, a.ext);
+    await new FileSystemService(a.state).Export();
+    const first = await fs.readFile(path.join(folder, "cloudSettings"), "utf8");
+
+    await new FileSystemService(a.state).Export();
+    expect(
+      await fs.readFile(path.join(folder, "cloudSettings"), "utf8")
+    ).to.equal(first);
+
+    await fs.remove(path.join(user, "snippets", "go.json"));
+    await new FileSystemService(a.state).Export();
+    expect(await fs.pathExists(path.join(folder, "snippets", "go.json"))).to.be
+      .false;
+  });
+
+  it("asks for a folder when none is set and switches to File System sync", async () => {
+    const user = path.join(root, "a", "User");
+    await fs.outputFile(path.join(user, "settings.json"), "{}");
+    const a = Machine(user, OsType.Linux, (_custom, ext) => {
+      ext.quietSync = true;
+    });
+    answers.openDialog = folder;
+
+    await new FileSystemService(a.state).Export();
+
+    expect(a.custom.syncMethod).to.equal(SyncMethod.FileSystem);
+    expect(a.custom.fileSystemSettings.path).to.equal(folder);
+    expect(await fs.pathExists(path.join(folder, "settings.json"))).to.be.true;
+  });
+
+  it("refuses a folder inside the user folder", async () => {
+    const user = path.join(root, "a", "User");
+    await fs.outputFile(path.join(user, "settings.json"), "{}");
+    const a = Machine(user, OsType.Linux, () => undefined);
+    UseFolder(a.custom, a.ext);
+    a.custom.fileSystemSettings.path = path.join(user, "backup");
+
+    await new FileSystemService(a.state).Export();
+
+    expect(recorded.errors).to.have.length(1);
+    expect(recorded.errors[0]).to.match(/user folder/);
+    expect(await fs.pathExists(path.join(user, "backup"))).to.be.false;
+  });
+
+  it("reports a folder without exported settings", async () => {
+    const user = path.join(root, "a", "User");
+    const a = Machine(user, OsType.Linux, () => undefined);
+    UseFolder(a.custom, a.ext);
+    await fs.ensureDir(folder);
+
+    await new FileSystemService(a.state).Import();
+
+    expect(recorded.errors).to.have.length(1);
+    expect(recorded.errors[0]).to.match(/No exported settings/);
+  });
+
+  it("shows the summary page unless quiet sync is on", async () => {
+    const user = path.join(root, "a", "User");
+    await fs.outputFile(path.join(user, "settings.json"), "{}");
+    const a = Machine(user, OsType.Linux, () => undefined);
+    UseFolder(a.custom, a.ext);
+    a.ext.quietSync = false;
+
+    await new FileSystemService(a.state).Export();
+
+    expect(a.summaries).to.have.length(1);
+    expect(a.summaries[0][0]).to.equal(true);
+  });
+});

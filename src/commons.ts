@@ -1,5 +1,6 @@
 "use strict";
 import * as vscode from "vscode";
+import { SyncMethod } from "./enums/syncMethod.enum";
 import localize from "./localize";
 import { CustomConfig } from "./models/customConfig.model";
 import { ExtensionConfig } from "./models/extensionConfig.model";
@@ -486,22 +487,30 @@ export default class Commons {
     );
     outputChannel.appendLine(`Version: ${this.state.environment.getVersion()}`);
     outputChannel.appendLine(`--------------------`);
-    outputChannel.appendLine(
-      `GitHub Token: ${
-        syncSettings.customConfig.githubSettings.token
-          ? syncSettings.customConfig.githubSettings.token.slice(0, 4) +
-            "**********"
-          : "Anonymous"
-      }`
-    );
-    outputChannel.appendLine(`GitHub Gist: ${syncSettings.extConfig.gist}`);
-    outputChannel.appendLine(
-      `GitHub Gist Type: ${syncSettings.publicGist ? "Public" : "Secret"}`
-    );
+    const fileSystemSync =
+      syncSettings.customConfig.syncMethod === SyncMethod.FileSystem;
+    if (fileSystemSync) {
+      outputChannel.appendLine(
+        `File System Folder: ${syncSettings.customConfig.fileSystemSettings.path}`
+      );
+    } else {
+      outputChannel.appendLine(
+        `GitHub Token: ${
+          syncSettings.customConfig.githubSettings.token
+            ? syncSettings.customConfig.githubSettings.token.slice(0, 4) +
+              "**********"
+            : "Anonymous"
+        }`
+      );
+      outputChannel.appendLine(`GitHub Gist: ${syncSettings.extConfig.gist}`);
+      outputChannel.appendLine(
+        `GitHub Gist Type: ${syncSettings.publicGist ? "Public" : "Secret"}`
+      );
+    }
     const dateNow = new Date();
     outputChannel.appendLine("TIMESTAMP : " + dateNow.toLocaleString());
     outputChannel.appendLine(``);
-    if (!syncSettings.customConfig.githubSettings.token) {
+    if (!fileSystemSync && !syncSettings.customConfig.githubSettings.token) {
       outputChannel.appendLine(
         `Anonymous Gist cannot be edited, the extension will always create a new one during upload.`
       );
