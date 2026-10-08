@@ -121,7 +121,15 @@ export async function createPrivateRepository(
   if (response.statusCode !== 201) {
     throw new Error(httpFailure(response.statusCode));
   }
-  return parseRepository(validated, parseObject(response.body), repositoryName);
+  const created = parseRepository(validated, parseObject(response.body), repositoryName);
+  // "Create Private Repository and Use It" must never route sensitive settings
+  // into a provider-created public or internal repository.
+  if (!created.private) {
+    throw new Error(
+      "The provider created a non-private repository. Review its visibility before syncing."
+    );
+  }
+  return created;
 }
 
 export async function listOwnedRepositories(
