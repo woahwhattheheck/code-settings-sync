@@ -44,7 +44,13 @@ export class GistService implements ISyncService {
       await this.StartDownload(localSettings);
     } catch (err) {
       Commons.LogException(err, this.state.commons.ERROR_MESSAGE, true);
-      return;
+    } finally {
+      // Even an up-to-date gist, missing remote, dirty-editor conflict, or
+      // partial write must restore background sync after we stopped it.
+      // Centralize this here so a successful download starts it only once.
+      if (localSettings.extConfig.autoUpload) {
+        await this.state.watcher.HandleStartWatching();
+      }
     }
   }
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
@@ -430,7 +436,7 @@ export class GistService implements ISyncService {
       return;
     }
 
-    let extensionsInstallSummary: InstalledExtensionsSummary;
+    let extensionsInstallSummary: InstalledExtensionsSummary = new InstalledExtensionsSummary();
     let deletedExtensions: ExtensionInformation[] = [];
     const ignoredExtensions: string[] =
       customSettings.ignoreExtensions || new Array<string>();
@@ -714,9 +720,8 @@ export class GistService implements ISyncService {
           5000
         );
       }
-      if (syncSetting.autoUpload) {
-        await this.state.watcher.HandleStartWatching();
-      }
+      // The public Import wrapper owns the watcher restart in its finally
+      // block, including early return, conflict and partial write paths.
     } else {
       void vscode.window.showErrorMessage(
         localize("cmd.downloadSettings.error.unableSave")
