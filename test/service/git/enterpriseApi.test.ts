@@ -138,6 +138,40 @@ describe("enterprise repository API", () => {
       );
     });
 
+    it("refuses a GitHub repository that was not actually created private", async () => {
+      await expectRejection(
+        createPrivateRepository(
+          settings("github", "https://api.github.com", TOKEN),
+          "settings",
+          {
+            transport: fixed(201, {
+              name: "settings",
+              private: false,
+              clone_url: "https://github.com/me/settings.git"
+            })
+          }
+        ),
+        "The provider created a non-private repository. Review its visibility before syncing."
+      );
+    });
+
+    it("refuses a GitLab project created with internal visibility", async () => {
+      await expectRejection(
+        createPrivateRepository(
+          settings("gitlab", "https://gitlab.example/api/v4", TOKEN),
+          "settings",
+          {
+            transport: fixed(201, {
+              path: "settings",
+              visibility: "internal",
+              http_url_to_repo: "https://gitlab.example/me/settings.git"
+            })
+          }
+        ),
+        "The provider created a non-private repository. Review its visibility before syncing."
+      );
+    });
+
     it("rejects a public GitHub clone URL for a GitHub Enterprise API", async () => {
       const seen: string[] = [];
       await expectRejection(
