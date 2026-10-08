@@ -96,4 +96,56 @@ describe("repository sync managed ignores", () => {
     }
   });
 
+  it("refreshes remote tracking state before a force-with-lease upload", async () => {
+    const service = new GitRepositorySyncService({} as IExtensionState);
+    const calls: string[][] = [];
+    const subject = service as unknown as {
+      runner: {
+        run: (
+          cwd: string,
+          args: string[],
+          shouldTrim?: boolean
+        ) => Promise<string>;
+      };
+      initialize: (
+        cwd: string,
+        branch: string,
+        checkoutBranch?: boolean
+      ) => Promise<void>;
+      writeManagedExcludes: (cwd: string, settings: unknown) => Promise<void>;
+      ensureRemote: (cwd: string, remote: string) => Promise<void>;
+      untrackIgnoredFiles: (cwd: string) => Promise<void>;
+      upload: (
+        cwd: string,
+        remote: string,
+        branch: string,
+        settings: unknown
+      ) => Promise<{ changed: boolean; pushed: boolean }>;
+    };
+    subject.initialize = async () => undefined;
+    subject.writeManagedExcludes = async () => undefined;
+    subject.ensureRemote = async () => undefined;
+    subject.untrackIgnoredFiles = async () => undefined;
+    subject.runner = {
+      run: async (_cwd, args) => {
+        calls.push(args);
+        return "";
+      }
+    };
+
+    await subject.upload(
+      "/home/profile",
+      "https://git.example.test/settings.git",
+      "office",
+      {}
+    );
+
+    const fetchIndex = calls.findIndex(args => args[0] === "fetch");
+    const pushIndex = calls.findIndex(args => args[0] === "push");
+    expect(fetchIndex).to.be.greaterThan(-1);
+    expect(pushIndex).to.be.greaterThan(fetchIndex);
+    expect(calls[fetchIndex]).to.deep.equal(["fetch", "--prune", "origin"]);
+    expect(calls[pushIndex]).to.include("--force-with-lease");
+  });
+
 });

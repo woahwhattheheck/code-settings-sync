@@ -125,6 +125,11 @@ export class GitRepositorySyncService implements ISyncService {
     await this.initialize(directory, branch);
     await this.writeManagedExcludes(directory, customSettings);
     await this.ensureRemote(directory, remote);
+    // Refresh remote-tracking refs before --force-with-lease. A fresh local
+    // repository otherwise has no lease for an existing remote branch, while a
+    // stale repository could protect an older remote state. Fetching first
+    // makes the push reject only if the branch changes after this point.
+    await this.runner.run(directory, ["fetch", "--prune", "origin"]);
     // Git ignore rules only prevent adding UNTRACKED files. Once a user has
     // tracked a settings/credential file, newly ignoring it is insufficient:
     // git add --all would still stage and publish future changes to that file.
