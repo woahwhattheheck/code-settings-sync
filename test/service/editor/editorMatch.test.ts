@@ -1,4 +1,6 @@
 import { expect } from "chai";
+import * as fs from "fs-extra";
+import * as os from "os";
 import * as path from "path";
 
 import { HasDirtyDocument } from "../../../src/service/editorMatch";
@@ -30,6 +32,31 @@ describe("HasDirtyDocument", () => {
     expect(
       HasDirtyDocument([{ fileName: target, isDirty: true }], relative)
     ).to.equal(true);
+  });
+
+  it("matches a dirty document opened through the real target of a symlink", () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "editor-match-"));
+    const realDirectory = path.join(directory, "real");
+    const linkedDirectory = path.join(directory, "linked");
+    fs.mkdirpSync(realDirectory);
+    const realTarget = path.join(realDirectory, "settings.json");
+    fs.writeFileSync(realTarget, "{}");
+    fs.symlinkSync(
+      realDirectory,
+      linkedDirectory,
+      process.platform === "win32" ? "junction" : "dir"
+    );
+
+    try {
+      expect(
+        HasDirtyDocument(
+          [{ fileName: realTarget, isDirty: true }],
+          path.join(linkedDirectory, "settings.json")
+        )
+      ).to.equal(true);
+    } finally {
+      fs.removeSync(directory);
+    }
   });
 
   it("returns false for an empty list of open documents", () => {
