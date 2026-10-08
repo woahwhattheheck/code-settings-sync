@@ -170,7 +170,8 @@ export class GitRepositorySyncService implements ISyncService {
       "origin/" + branch
     ]);
     await this.runner.run(directory, ["reset", "--hard", "origin/" + branch]);
-    await this.runner.run(directory, ["clean", "-fd"]);
+    // Force-download updates tracked settings; never erase unrelated untracked
+    // VS Code user files with `git clean -fd` in the entire user directory.
   }
 
   private async initialize(directory: string, branch: string): Promise<void> {
